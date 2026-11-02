@@ -6,7 +6,10 @@ Mesa de ayuda con Requerimientos (R), Incidentes (I) y Control de cambios (C).
 - Para probar en local sirve la carpeta con cualquier servidor estático (`.claude/serve.ps1` levanta uno en el puerto 8123).
   Para publicarla sirve GitHub Pages, Netlify o Cloudflare Pages.
 - Configuración: `js/config.js` (URL del proyecto y clave *publishable*; es pública por diseño). Nunca pongas ahí la clave *secret*.
-- Base de datos: `docs/schema.sql`, luego `docs/migracion-02-app.sql` y `docs/migracion-03-permisos.sql`. Detalle y plan de Power BI en `docs/plan-base-de-datos.md`.
+- Base de datos: `docs/schema.sql`, luego `docs/migracion-02-app.sql`, `docs/migracion-03-permisos.sql` y `docs/migracion-04-adjuntos.sql`. Detalle y plan de Power BI en `docs/plan-base-de-datos.md`.
+- **Adjuntos:** cada ticket acepta archivos (capturas, PDF, Office, texto, CSV, ZIP, correos .eml/.msg; máx. 10 MB c/u) que se suben con el botón,
+  arrastrándolos o pegando una captura con Ctrl+V, también al crear el ticket. Viven en un bucket **privado** de Supabase Storage y se abren con una URL
+  firmada de un minuto. Los ve quien ve el ticket; los borra quien los subió, un analista o el administrador. El plan gratuito de Supabase da 1 GB en total.
 - Roles: Administrador, Analista, Técnico. Los permisos de cada rol los aplica la **base** (RLS + disparadores), no solo la pantalla:
   el técnico solo ve lo asignado a él o creado por él, mueve el estado dentro de su flujo y no cambia prioridad, categoría ni reasigna;
   aprobar, programar y cerrar es de analista/administrador; un usuario inactivo no ve nada; las fechas las pone el servidor.

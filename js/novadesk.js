@@ -32,7 +32,7 @@ const isOpen = t => !OPEN_NOT.includes(t.status);
 
 /* ───────────── Estado y persistencia ───────────── */
 let S = { users: [], clients: [], tickets: [], audit: [], session: null };
-const ui = { view: 'dashboard', f: { q: '', type: '', status: 'abiertos', client: '', prio: '', assignee: '' }, boardType: 'I', open: null, overlay: null, draft: null, booting: true };
+const ui = { view: 'dashboard', f: { q: '', type: '', status: 'abiertos', client: '', prio: '', assignee: '' }, boardType: 'I', open: null, overlay: null, draft: null, booting: true, up: 0 };
 const uid = () => crypto.randomUUID();
 const me = () => S.users.find(u => u.id === S.session);
 const role = () => me()?.role;
@@ -64,7 +64,7 @@ const ticketRow = t => ({ id: t.id, type: t.type, title: t.title, description: t
   change_hours: t.change?.hours ?? null, change_rollback: t.change?.rollback ?? null });
 function fromTicket(r) {
   const t = { id: r.id, type: r.type, title: r.title, desc: r.description, clientId: r.client_id, requester: r.requester, priority: r.priority, status: r.status, category: r.category,
-    assigneeId: r.assignee_id, createdBy: r.created_by, createdAt: toMs(r.created_at), updatedAt: toMs(r.updated_at), resolvedAt: toMs(r.resolved_at), ai: r.ai_confidence, comments: [], history: [] };
+    assigneeId: r.assignee_id, createdBy: r.created_by, createdAt: toMs(r.created_at), updatedAt: toMs(r.updated_at), resolvedAt: toMs(r.resolved_at), ai: r.ai_confidence, comments: [], history: [], attachments: [] };
   if (r.type === 'C') t.change = { impact: r.change_impact || 2, complexity: r.change_complexity || 2, start: toMs(r.change_start), hours: r.change_hours == null ? 2 : Number(r.change_hours), rollback: r.change_rollback || '', approvals: [] };
   return t;
 }
@@ -82,9 +82,10 @@ async function fetchAll(table, order) {
 }
 async function fetchData(isAdmin) {
   const audit = isAdmin ? sb.from('audit_log').select('*').order('created_at', { ascending: false }).limit(200).then(r => { if (r.error) throw r.error; return r.data.reverse(); }) : [];
-  const [cl, us, tk, cm, hs, ap, au] = await Promise.all([fetchAll('clients', ['name']), fetchAll('profiles', ['name']), fetchAll('tickets', ['created_at', 'id']),
-    fetchAll('ticket_comments', ['created_at', 'id']), fetchAll('ticket_history', ['created_at', 'id']), fetchAll('change_approvals', ['created_at', 'id']), audit]);
-  return { cl, us, tk, cm, hs, ap, au };
+  const [cl, us, tk, cm, hs, ap, fa, au] = await Promise.all([fetchAll('clients', ['name']), fetchAll('profiles', ['name']), fetchAll('tickets', ['created_at', 'id']),
+    fetchAll('ticket_comments', ['created_at', 'id']), fetchAll('ticket_history', ['created_at', 'id']), fetchAll('change_approvals', ['created_at', 'id']),
+    fetchAll('ticket_attachments', ['created_at', 'id']), audit]);
+  return { cl, us, tk, cm, hs, ap, fa, au };
 }
 function applyData(d) {
   S.clients = d.cl.map(fromClient); S.users = d.us.map(fromUser); S.tickets = d.tk.map(fromTicket);
@@ -92,6 +93,7 @@ function applyData(d) {
   d.cm.forEach(c => by[c.ticket_id]?.comments.push({ id: c.id, by: c.author_id, at: toMs(c.created_at), text: c.body, internal: c.internal }));
   d.hs.forEach(h => by[h.ticket_id]?.history.push({ at: toMs(h.created_at), by: h.actor_id, text: h.text }));
   d.ap.forEach(a => by[a.ticket_id]?.change?.approvals.push({ by: a.approver_id, at: toMs(a.created_at), decision: a.decision, note: a.note }));
+  d.fa.forEach(a => by[a.ticket_id]?.attachments.push({ id: a.id, name: a.file_name, mime: a.mime_type, size: Number(a.size_bytes), path: a.storage_path, by: a.uploader_id, at: toMs(a.created_at) }));
   S.audit = d.au.map(a => ({ at: toMs(a.created_at), by: a.actor_id, text: a.text, sent: true }));
   snap = { clients: {}, users: {}, tickets: {} };
   S.clients.forEach(c => { snap.clients[c.id] = JSON.stringify(clientRow(c)); });
@@ -128,7 +130,7 @@ function save() {
 window.addEventListener('beforeunload', e => { if (pending) { e.preventDefault(); e.returnValue = ''; } });
 /* Relee los datos del servidor (cambios de otros usuarios) sin pisar nada que el usuario esté editando. */
 async function refresh() {
-  if (!S.session || pending || ui.overlay || ui.view === 'new' || document.hidden || /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '')) return;
+  if (!S.session || pending || ui.up || ui.overlay || ui.view === 'new' || document.hidden || /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '')) return;
   const r0 = rev;
   try { const d = await fetchData(myRole === 'admin'); if (rev === r0 && !pending && S.session) { applyData(d); render(); } } catch (e) { console.warn('refresh', e); }
 }
@@ -393,6 +395,77 @@ function changeConflicts(t) {
   return S.tickets.filter(o => o.id !== t.id && o.type === 'C' && o.change?.start && !['Cerrado', 'Rechazado', 'Implementado'].includes(o.status) && o.clientId === t.clientId && o.change.start < e && o.change.start + (o.change.hours || 1) * H > s);
 }
 
+/* ───────────── Adjuntos ─────────────
+   Los archivos viven en un bucket privado de Supabase Storage (docs/migracion-04-adjuntos.sql); aquí se valida lo mismo que valida
+   el servidor para avisar antes de subir. Se abren con una URL firmada que dura un minuto. Primero se registra la ficha y luego
+   se sube el archivo (Storage solo acepta archivos que ya tengan su ficha); al borrar es al revés. */
+const BUCKET = 'ticket-files', MAX_FILE = 10 * 1024 * 1024;
+const FILE_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', pdf: 'application/pdf', txt: 'text/plain', log: 'text/plain', csv: 'text/csv',
+  doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', zip: 'application/zip', eml: 'message/rfc822', msg: 'application/vnd.ms-outlook' };
+const OK_MIME = new Set([...Object.values(FILE_TYPES), 'application/x-zip-compressed']);
+const ACCEPT = Object.keys(FILE_TYPES).map(e => '.' + e).join(',');
+const fileMime = f => (OK_MIME.has(f.type) ? f.type : FILE_TYPES[String(f.name).split('.').pop().toLowerCase()] || f.type || '');
+const fileProblem = f => (!f.size ? 'está vacío' : f.size > MAX_FILE ? 'pesa más de 10 MB' : !OK_MIME.has(fileMime(f)) ? 'ese tipo de archivo no está permitido' : '');
+const fileSize = n => (n < 1024 ? n + ' B' : n < 1048576 ? Math.round(n / 1024) + ' KB' : (n / 1048576).toFixed(1) + ' MB');
+const fileIcon = m => (m.startsWith('image/') ? '🖼️' : m === 'application/pdf' ? '📕' : /sheet|excel|csv/.test(m) ? '📊' : /word/.test(m) ? '📝' : /rfc822|outlook/.test(m) ? '✉️' : '📎');
+const safeName = n => norm(n).replace(/[^a-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(-80) || 'archivo';
+const named = f => (f.name === 'image.png' ? new File([f], 'captura-' + new Date().toISOString().replace(/\D/g, '').slice(0, 14) + '.png', { type: f.type }) : f);  // las capturas pegadas vienen todas como «image.png»
+let draftFiles = [];   // archivos elegidos en el formulario de ticket nuevo: se suben cuando el ticket ya existe
+
+async function attach(t, files) {
+  if (!files.length) return;
+  ui.up += files.length; render();
+  let n = 0;
+  for (const f of files) {
+    try {
+      const bad = fileProblem(f); if (bad) { toast(`«${f.name}»: ${bad}`); continue; }
+      const mime = fileMime(f), path = `${t.id}/${uid()}-${safeName(f.name)}`;
+      const row = { id: uid(), ticket_id: t.id, uploader_id: S.session, file_name: f.name.slice(0, 200), mime_type: mime, size_bytes: f.size, storage_path: path };
+      await run(sb.from('ticket_attachments').insert(row));
+      const { error } = await sb.storage.from(BUCKET).upload(path, f, { contentType: mime });
+      if (error) { await sb.from('ticket_attachments').delete().eq('id', row.id); throw error; }
+      t.attachments.push({ id: row.id, name: row.file_name, mime, size: f.size, path, by: S.session, at: Date.now() });
+      log(t, `Adjuntó «${row.file_name}»`); n++;
+    } catch (e) { toast(`No se pudo subir «${f.name}»: ${e.message || e}`); }
+    finally { ui.up--; }
+  }
+  if (n) { save(); toast(n === 1 ? 'Archivo adjuntado' : `${n} archivos adjuntados`); }
+  render();
+}
+async function openFile(a) {
+  const { data, error } = await sb.storage.from(BUCKET).createSignedUrl(a.path, 60, /^image\/|\/pdf$/.test(a.mime) ? undefined : { download: a.name });
+  if (error) return toast('No se pudo abrir el archivo: ' + error.message);
+  const l = document.createElement('a'); l.href = data.signedUrl; l.target = '_blank'; l.rel = 'noopener'; l.click();
+}
+async function dropFile(t, a) {
+  if (!confirm(`¿Eliminar «${a.name}»? No se puede deshacer.`)) return;
+  const r1 = await sb.storage.from(BUCKET).remove([a.path]);
+  if (r1.error) return toast('No se pudo eliminar el archivo: ' + r1.error.message);
+  const r2 = await sb.from('ticket_attachments').delete().eq('id', a.id).select();
+  if (r2.error) return toast('No se pudo eliminar el archivo: ' + r2.error.message);
+  if (!r2.data.length) return toast('Solo quien lo subió, un analista o el administrador pueden eliminar este archivo');
+  t.attachments = t.attachments.filter(x => x.id !== a.id); log(t, `Eliminó el adjunto «${a.name}»`); save(); render();
+}
+/* El formulario de ticket nuevo se redibuja al escribir; antes de redibujarlo por otra causa se guarda lo escrito. */
+function keepDraft() { const form = $('#newForm'); if (form) ui.draft = Object.fromEntries(new FormData(form).entries()); }
+function queueFiles(files) {
+  keepDraft();
+  for (const f of files.map(named)) {
+    const bad = fileProblem(f);
+    if (bad) toast(`«${f.name}»: ${bad}`); else if (draftFiles.length >= 10) { toast('Puedes adjuntar hasta 10 archivos al crear el ticket (después agrega más)'); break; } else draftFiles.push(f);
+  }
+  render();
+}
+const FILE_HINT = 'Máx. 10 MB por archivo: imágenes, PDF, Office, texto, CSV, ZIP y correos (.eml/.msg). No subas datos de pacientes.';
+function viewFiles(t) {
+  const list = t.attachments || [];
+  return `<div class="card dz drop" data-dz="${t.id}"><div class="row between wrap" style="margin-bottom:8px"><h3 style="margin:0">Adjuntos${list.length ? ` (${list.length})` : ''}</h3><label class="btn sm" style="margin:0">＋ Adjuntar<input type="file" data-file="${t.id}" accept="${ACCEPT}" multiple hidden></label></div>
+    ${list.map(a => `<div class="sug row between"><span style="min-width:0;overflow-wrap:anywhere">${fileIcon(a.mime)} <span class="lnk" data-act="openFile" data-id="${a.id}">${esc(a.name)}</span> <span class="muted sm">${fileSize(a.size)} · ${esc(user(a.by)?.name || '—')} · ${rel(a.at)}</span></span>${staff() || a.by === S.session ? `<button class="btn sm" data-act="delFile" data-id="${a.id}" title="Eliminar">🗑</button>` : ''}</div>`).join('')}
+    ${ui.up ? `<div class="sug">⏳ Subiendo ${ui.up} archivo(s)…</div>` : ''}
+    <div class="muted sm" style="margin-top:6px">Arrastra archivos aquí o pega una captura (Ctrl+V). ${FILE_HINT}</div></div>`;
+}
+
 /* ───────────── Utilidades de vista ───────────── */
 const visible = () => (staff() ? S.tickets : S.tickets.filter(t => t.assigneeId === S.session || t.createdBy === S.session));
 const fdate = ts => new Date(ts).toLocaleString('es-CL', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
@@ -570,7 +643,7 @@ function viewUsers() {
     <td><div class="row"><button class="btn sm" data-act="userForm" data-id="${u.id}">Editar</button><button class="btn sm" data-act="resetPw" data-id="${u.id}">🔑 Restablecer clave</button></div></td></tr>`).join('')}</table></div>
   <div class="card" style="margin-top:16px"><h3>🛡️ Registro de seguridad (últimos 15 eventos)</h3>${S.audit.slice(-15).reverse().map(a => `<div class="row sm" style="padding:4px 0"><span class="muted" style="width:110px">${fdate(a.at)}</span><b style="width:150px">${esc(user(a.by)?.name || 'Anónimo')}</b><span>${esc(a.text)}</span></div>`).join('') || '<div class="muted">Sin eventos</div>'}</div>
   <div class="card" style="margin-top:16px"><h3>Matriz de permisos</h3><table><tr><th>Acción</th><th>👑 Admin</th><th>🧭 Analista</th><th>🛠️ Técnico</th></tr>
-  ${[['Ver todos los tickets', 1, 1, 0], ['Ver tickets asignados / propios', 1, 1, 1], ['Crear tickets', 1, 1, 1], ['Clasificar y asignar con Nova', 1, 1, 0], ['Cambiar prioridad / categoría', 1, 1, 0], ['Trabajar y resolver tickets', 1, 1, 1], ['Aprobar / rechazar cambios (CAB)', 1, 1, 0], ['Ejecutar cambios aprobados', 1, 1, 1], ['Gestionar clientes y usuarios', 1, 0, 0], ['Restablecer contraseñas', 1, 0, 0]].map(r => `<tr><td>${r[0]}</td>${r.slice(1).map(x => `<td>${x ? '✅' : '—'}</td>`).join('')}</tr>`).join('')}</table></div>`);
+  ${[['Ver todos los tickets', 1, 1, 0], ['Ver tickets asignados / propios', 1, 1, 1], ['Crear tickets', 1, 1, 1], ['Adjuntar archivos y ver los de sus tickets', 1, 1, 1], ['Eliminar archivos de otras personas', 1, 1, 0], ['Clasificar y asignar con Nova', 1, 1, 0], ['Cambiar prioridad / categoría', 1, 1, 0], ['Trabajar y resolver tickets', 1, 1, 1], ['Aprobar / rechazar cambios (CAB)', 1, 1, 0], ['Ejecutar cambios aprobados', 1, 1, 1], ['Gestionar clientes y usuarios', 1, 0, 0], ['Restablecer contraseñas', 1, 0, 0]].map(r => `<tr><td>${r[0]}</td>${r.slice(1).map(x => `<td>${x ? '✅' : '—'}</td>`).join('')}</tr>`).join('')}</table></div>`);
 }
 
 function novaPanel(a, cur) {
@@ -604,6 +677,9 @@ function viewNew() {
       <div><label>Impacto</label><select name="impact">${opt(1, 'Bajo', d.impact || 2)}${opt(2, 'Medio', d.impact || 2)}${opt(3, 'Alto', d.impact || 2)}</select></div>
       <div><label>Complejidad</label><select name="complexity">${opt(1, 'Baja', d.complexity || 2)}${opt(2, 'Media', d.complexity || 2)}${opt(3, 'Alta', d.complexity || 2)}</select></div></div>
       <label style="margin-top:8px">Plan de rollback</label><textarea name="rollback" style="min-height:70px">${esc(d.rollback || '')}</textarea></div>` : ''}
+    <div class="dz drop" data-dz="new"><div class="row between wrap"><div><b>📎 Adjuntos</b> <span class="muted sm">(opcional)</span></div><label class="btn sm" style="margin:0">Elegir archivos<input type="file" data-file="new" accept="${ACCEPT}" multiple hidden></label></div>
+      ${draftFiles.map((f, i) => `<div class="sug row between"><span style="min-width:0;overflow-wrap:anywhere">${fileIcon(fileMime(f))} ${esc(f.name)} <span class="muted sm">${fileSize(f.size)}</span></span><button type="button" class="btn sm" data-act="unqueue" data-i="${i}" title="Quitar">✕</button></div>`).join('')}
+      <div class="muted sm" style="margin-top:6px">Arrastra archivos aquí o pega una captura (Ctrl+V). ${FILE_HINT}</div></div>
     <div class="row"><button class="btn pri" type="submit">Crear ticket</button><button class="btn" type="button" data-act="nav" data-v="tickets">Cancelar</button></div>
   </form>
   <div>${a ? novaPanel(a) : '<div class="ai"><h3><span class="spark">✦</span> Nova IA</h3><p class="muted">Empieza a escribir el asunto y la descripción: clasificaré el tipo, la categoría, la prioridad y sugeriré técnico y primeras acciones en tiempo real.</p></div>'}</div></div>`);
@@ -621,6 +697,7 @@ function viewDrawer(t) {
   ${t.status === 'Rechazado' ? '<div class="alert bad">Este cambio fue rechazado por el CAB.</div>' : ''}
   <div class="detail"><div class="col">
     <div class="card"><h3>Descripción</h3><div style="white-space:pre-wrap">${esc(t.desc)}</div></div>
+    ${viewFiles(t)}
     ${s && s.st !== 'ok' && isOpen(t) ? `<div class="alert ${s.st === 'bad' ? 'bad' : ''}">⏱️ SLA ${s.st === 'bad' ? 'vencido' : 'en riesgo'}: ${s.label}</div>` : ''}
     ${t.type === 'C' ? `<div class="card"><h3>Plan del cambio</h3>
       ${conf.length ? `<div class="alert">⚠️ Conflicto de ventana con ${conf.map(c => c.id).join(', ')} (mismo cliente).</div>` : ''}
@@ -720,14 +797,17 @@ const A = {
       ui.overlay = { kind: 'temp', name: u.name, login: r.login, pw: r.password }; render();
     } catch (e) { toast(e.message); }
   },
-  nav: d => { ui.view = d.v; ui.open = null; ui.overlay = null; if (d.v === 'new') ui.draft = {}; render(); },
+  nav: d => { ui.view = d.v; ui.open = null; ui.overlay = null; draftFiles = []; if (d.v === 'new') ui.draft = {}; render(); },
   theme: () => { localStorage.setItem(THEME_KEY, theme() === 'dark' ? 'light' : 'dark'); render(); },
   open: d => { ui.open = d.id; ui.overlay = null; render(); },
   closeOv: () => { ui.open = null; ui.overlay = null; render(); },
   palette: () => { ui.overlay = { kind: 'palette' }; render(); },
   ftype: d => { ui.f.type = d.v; render(); },
   btype: d => { ui.boardType = d.v; render(); },
-  newtype: d => { ui.view = 'new'; ui.draft = { type: d.v }; render(); },
+  newtype: d => { ui.view = 'new'; ui.draft = { type: d.v }; draftFiles = []; render(); },
+  openFile: d => { const a = S.tickets.find(x => x.id === ui.open)?.attachments.find(x => x.id === d.id); if (a) openFile(a); },
+  delFile: d => { const t = S.tickets.find(x => x.id === ui.open), a = t?.attachments.find(x => x.id === d.id); if (a) dropFile(t, a); },
+  unqueue: d => { keepDraft(); draftFiles.splice(+d.i, 1); render(); },
   status: d => { const t = S.tickets.find(x => x.id === d.id); if (setStatus(t, d.to)) { toast(`${t.id} → ${d.to}`); render(); } },
   cab: d => { const t = S.tickets.find(x => x.id === d.id); if (setStatus(t, d.d)) { toast(`${t.id}: ${d.d}`); render(); } },
   comment: d => { const txt = $('#cm').value.trim(); if (!txt) return; const t = S.tickets.find(x => x.id === d.id); t.comments.push({ id: uid(), by: S.session, at: Date.now(), text: txt, internal: $('#cmInt').checked }); t.updatedAt = Date.now(); save(); render(); },
@@ -814,6 +894,7 @@ async function submitAuth(form) {
 }
 async function createTicket(fd) {
   if (createTicket.busy) return; createTicket.busy = true;
+  let up = null;
   try {
     const title = fd.get('title').trim(), desc = fd.get('desc').trim(), cl = fd.get('clientId'), a = classify(title + ' ' + desc, cl, { type: fd.get('type') });
     const type = fd.get('type') || a.type, auto = [!fd.get('type'), !fd.get('priority'), !fd.get('category')].some(Boolean);
@@ -821,12 +902,14 @@ async function createTicket(fd) {
     if (error) return toast('No se pudo generar el número del ticket: ' + error.message);
     const now = Date.now();
     const t = { id, type, title, desc, clientId: cl, requester: fd.get('requester').trim() || me().name, priority: +fd.get('priority') || a.priority, category: fd.get('category') || a.category,
-      status: type === 'C' ? 'Borrador' : 'Nuevo', assigneeId: null, createdBy: S.session, createdAt: now, updatedAt: now, comments: [], history: [{ at: now, by: S.session, text: 'Ticket creado' + (auto ? ` · Nova clasificó con ${a.confidence}% de confianza` : '') }], ai: auto ? a.confidence : null };
+      status: type === 'C' ? 'Borrador' : 'Nuevo', assigneeId: null, createdBy: S.session, createdAt: now, updatedAt: now, comments: [], attachments: [], history: [{ at: now, by: S.session, text: 'Ticket creado' + (auto ? ` · Nova clasificó con ${a.confidence}% de confianza` : '') }], ai: auto ? a.confidence : null };
     if (type === 'C') { const st = fd.get('start'); t.change = { impact: +fd.get('impact') || 2, complexity: +fd.get('complexity') || 2, start: st ? new Date(st).getTime() : null, hours: +fd.get('hours') || 2, rollback: fd.get('rollback') || '', approvals: [] }; }
     else if (staff() && a.assignee && t.priority <= 2) { t.assigneeId = a.assignee.id; t.status = 'Asignado'; t.history.push({ at: now, by: S.session, text: `Nova asignó automáticamente a ${a.assignee.name} (prioridad ${PRIO[t.priority]})` }); }
     else if (!staff()) { t.assigneeId = S.session; t.status = 'Asignado'; }
-    S.tickets.push(t); save(); toast(`Ticket ${t.id} creado${a.major ? ' · ⚡ posible incidente mayor' : ''}`); ui.view = 'tickets'; ui.open = t.id; ui.f.status = 'abiertos'; ui.f.type = ''; render();
+    S.tickets.push(t); save(); toast(`Ticket ${t.id} creado${a.major ? ' · ⚡ posible incidente mayor' : ''}`); ui.view = 'tickets'; ui.open = t.id; ui.f.status = 'abiertos'; ui.f.type = '';
+    if (draftFiles.length) up = { id: t.id, files: draftFiles }; draftFiles = []; render();
   } finally { createTicket.busy = false; }
+  if (up) { await syncQ; const t = S.tickets.find(x => x.id === up.id); if (t) await attach(t, up.files); }   // los archivos se suben cuando el ticket ya está en el servidor
 }
 
 /* ───────────── Eventos ───────────── */
@@ -842,6 +925,7 @@ document.addEventListener('click', e => {
 });
 ['keydown', 'pointerdown'].forEach(ev => document.addEventListener(ev, () => S && S.session && touch(), { passive: true }));
 document.addEventListener('input', e => {
+  if (e.target.type === 'file') return;
   if (['p1', 'p2'].includes(e.target.name) && $('#pwhint')) return checkPwForm(e.target.form);
   const f = e.target.dataset.f; if (f) { ui.f[f] = e.target.value; render(); return; }
   if (e.target.id === 'pal') return paletteResults();
@@ -849,6 +933,7 @@ document.addEventListener('input', e => {
 });
 document.addEventListener('change', e => {
   const el = e.target, f = el.dataset.f; if (f) { ui.f[f] = el.value; render(); return; }
+  if (el.dataset.file) { const files = [...el.files].map(named), t = S.tickets.find(x => x.id === el.dataset.file); el.value = ''; if (el.dataset.file === 'new') queueFiles(files); else if (t) attach(t, files); return; }
   if (el.closest('#newForm') && el.name === 'type') { const fd = new FormData(el.form); ui.draft = Object.fromEntries(fd.entries()); render(); return; }
   const t = ui.open && S.tickets.find(x => x.id === ui.open); if (!t) return;
   if ((el.dataset.edit || el.dataset.chg) && !staff() && !(el.dataset.chg && t.status === 'Borrador')) return toast('Acción no permitida para tu rol');
@@ -873,6 +958,21 @@ document.addEventListener('keydown', e => {
 });
 document.addEventListener('dragstart', e => { const c = e.target.closest?.('.tcard'); if (c) { e.dataTransfer.setData('text/plain', c.dataset.id); c.classList.add('drag'); } });
 document.addEventListener('dragend', e => e.target.classList?.remove('drag'));
+/* Archivos: arrastrarlos sobre una zona de adjuntos o pegar una captura (Ctrl+V) con el ticket abierto o en el formulario nuevo. */
+const dragFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');
+document.addEventListener('dragover', e => { if (!dragFiles(e)) return; e.preventDefault(); e.target.closest?.('.dz')?.classList.add('over'); });
+document.addEventListener('dragleave', e => e.target.closest?.('.dz')?.classList.remove('over'));
+document.addEventListener('drop', e => {
+  if (!dragFiles(e)) return; e.preventDefault();   // aunque caiga fuera de la zona, el navegador no debe abrir el archivo
+  const z = e.target.closest?.('.dz'); if (!z || !me()) return; z.classList.remove('over');
+  const files = [...e.dataTransfer.files].map(named), t = S.tickets.find(x => x.id === z.dataset.dz);
+  if (z.dataset.dz === 'new') queueFiles(files); else if (t) attach(t, files);
+});
+document.addEventListener('paste', e => {
+  const files = [...(e.clipboardData?.files || [])].map(named); if (!files.length || !me()) return;
+  const t = ui.open && S.tickets.find(x => x.id === ui.open);
+  if (t) { e.preventDefault(); attach(t, files); } else if (ui.view === 'new') { e.preventDefault(); queueFiles(files); }
+});
 document.addEventListener('dragover', e => { const l = e.target.closest?.('.lane'); if (l) { e.preventDefault(); document.querySelectorAll('.lane.over').forEach(x => x !== l && x.classList.remove('over')); l.classList.add('over'); } });
 document.addEventListener('drop', e => {
   const l = e.target.closest?.('.lane'); if (!l) return; e.preventDefault();

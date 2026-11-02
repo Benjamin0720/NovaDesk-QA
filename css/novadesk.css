@@ -125,6 +125,12 @@ tr.click{cursor:pointer} tr.click:hover td{background:rgba(139,123,255,.07)}
 .chip{display:inline-block;padding:2px 8px;margin:2px 3px 2px 0;border-radius:99px;font-size:11px;background:rgba(139,123,255,.15);color:var(--accent)}
 .sug{padding:8px 10px;border-radius:10px;background:var(--bg2);margin:4px 0;font-size:13px}
 
+/* adjuntos */
+.drop{border:1px dashed var(--line);border-radius:12px;padding:12px;transition:.15s}
+.card.drop{border-radius:var(--radius)}
+.dz.over{border-color:var(--accent);background:rgba(139,123,255,.12)}
+.lnk{color:var(--accent);cursor:pointer;text-decoration:underline}
+
 /* calendar */
 .cal{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}
 .day{min-height:120px;border:1px solid var(--line);border-radius:12px;padding:8px;background:var(--card)}

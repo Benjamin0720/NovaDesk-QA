@@ -1,4 +1,4 @@
--- NovaDesk · pruebas de los permisos de docs/migracion-03-permisos.sql.
+-- NovaDesk · pruebas de los permisos de docs/migracion-03-permisos.sql y docs/migracion-04-adjuntos.sql (aplicar ambas antes).
 --
 -- SON SEGURAS: crean usuarios y tickets de mentira dentro de una transacción que termina con un error a propósito, así que
 -- no queda nada guardado. El informe aparece en ese mensaje de error («RESULTADO»): cada línea es ✔ (salió lo esperado) o
@@ -173,6 +173,50 @@ begin
   perform pg_temp.attempt('administrador edita usuarios',                            adm,  format($q$update public.profiles set skills = '{Impresión}' where id = %L$q$, tec2), true);
   perform pg_temp.attempt('analista NO lee el registro de seguridad',                ana,  $q$select 1 from public.audit_log$q$, false);
   perform pg_temp.attempt('administrador lee el registro de seguridad',              adm,  $q$select 1 from public.audit_log$q$, true);
+
+  -- ───── Adjuntos (docs/migracion-04-adjuntos.sql) ─────
+  insert into public.tickets (id, type, title, description, client_id, requester, priority, status, category, assignee_id, created_by) values
+    ('ZT-11', 'I', 'Ticket de otro técnico', '', c, 'Prueba', 3, 'Asignado', 'General', tec2, ana);
+  insert into public.ticket_attachments (id, ticket_id, uploader_id, file_name, mime_type, size_bytes, storage_path) values
+    ('00000000-0000-0000-0000-0000000000f2', 'ZT-1', ana,  'de-analista.pdf',    'application/pdf', 1000, 'ZT-1/f2-de-analista.pdf'),
+    ('00000000-0000-0000-0000-0000000000f3', 'ZT-11', tec1, 'ajeno.png',          'image/png',       1000, 'ZT-11/f3-ajeno.png'),
+    ('00000000-0000-0000-0000-0000000000f5', 'ZT-11', tec1, 'ajeno-sin-subir.png', 'image/png',      1000, 'ZT-11/f5-ajeno-sin-subir.png'),
+    ('00000000-0000-0000-0000-0000000000f4', 'ZT-3', ina,  'del-inactivo.png',   'image/png',       1000, 'ZT-3/f4-del-inactivo.png'),
+    ('00000000-0000-0000-0000-0000000000f6', 'ZT-3', ina,  'inactivo-sin-subir.png', 'image/png',   1000, 'ZT-3/f6-inactivo-sin-subir.png');
+  insert into storage.objects (bucket_id, name) values
+    ('ticket-files', 'ZT-1/f2-de-analista.pdf'), ('ticket-files', 'ZT-11/f3-ajeno.png'), ('ticket-files', 'ZT-3/f4-del-inactivo.png');
+  perform set_config('storage.allow_delete_query', 'true', true);   -- Storage bloquea los DELETE directos salvo los de su propia API
+
+  perform pg_temp.verify('el bucket de adjuntos es privado y limita a 10 MB',        (select not public and file_size_limit = 10485760 from storage.buckets where id = 'ticket-files'));
+  perform pg_temp.attempt('técnico registra un adjunto en su ticket',                tec1, format($q$insert into public.ticket_attachments (id, ticket_id, uploader_id, file_name, mime_type, size_bytes, storage_path)
+    values ('00000000-0000-0000-0000-0000000000f1', 'ZT-1', %L, 'captura.png', 'image/png', 1000, 'ZT-1/f1-captura.png')$q$, tec1), true);
+  perform pg_temp.attempt('técnico NO registra un adjunto en un ticket ajeno',       tec1, format($q$insert into public.ticket_attachments (ticket_id, uploader_id, file_name, mime_type, size_bytes, storage_path)
+    values ('ZT-11', %L, 'x.png', 'image/png', 1000, 'ZT-11/x.png')$q$, tec1), false);
+  perform pg_temp.attempt('técnico NO registra un adjunto a nombre de otra persona', tec1, format($q$insert into public.ticket_attachments (ticket_id, uploader_id, file_name, mime_type, size_bytes, storage_path)
+    values ('ZT-1', %L, 'y.png', 'image/png', 1000, 'ZT-1/y.png')$q$, ana), false);
+  perform pg_temp.attempt('técnico NO registra un adjunto con la ruta de otro ticket', tec1, format($q$insert into public.ticket_attachments (ticket_id, uploader_id, file_name, mime_type, size_bytes, storage_path)
+    values ('ZT-1', %L, 'z.png', 'image/png', 1000, 'ZT-11/z.png')$q$, tec1), false);
+  perform pg_temp.attempt('NO se registra un archivo de más de 10 MB',               tec1, format($q$insert into public.ticket_attachments (ticket_id, uploader_id, file_name, mime_type, size_bytes, storage_path)
+    values ('ZT-1', %L, 'g.png', 'image/png', 10485761, 'ZT-1/g.png')$q$, tec1), false);
+  perform pg_temp.attempt('usuario inactivo NO registra adjuntos',                   ina,  format($q$insert into public.ticket_attachments (ticket_id, uploader_id, file_name, mime_type, size_bytes, storage_path)
+    values ('ZT-3', %L, 'i.png', 'image/png', 1000, 'ZT-3/i.png')$q$, ina), false);
+  perform pg_temp.attempt('técnico sube el archivo de su adjunto',                   tec1, $q$insert into storage.objects (bucket_id, name) values ('ticket-files', 'ZT-1/f1-captura.png')$q$, true);
+  perform pg_temp.attempt('técnico NO sube un archivo sin ficha',                    tec1, $q$insert into storage.objects (bucket_id, name) values ('ticket-files', 'ZT-1/sin-ficha.png')$q$, false);
+  perform pg_temp.attempt('técnico NO sube archivos a un ticket ajeno',              tec1, $q$insert into storage.objects (bucket_id, name) values ('ticket-files', 'ZT-11/f5-ajeno-sin-subir.png')$q$, false);
+  perform pg_temp.attempt('usuario inactivo NO sube archivos',                       ina,  $q$insert into storage.objects (bucket_id, name) values ('ticket-files', 'ZT-3/f6-inactivo-sin-subir.png')$q$, false);
+  perform pg_temp.attempt('técnico ve las fichas de su ticket',                      tec1, $q$select 1 from public.ticket_attachments where ticket_id = 'ZT-1'$q$, true);
+  perform pg_temp.attempt('técnico NO ve las fichas de tickets ajenos',              tec1, $q$select 1 from public.ticket_attachments where ticket_id = 'ZT-11'$q$, false);
+  perform pg_temp.attempt('usuario inactivo NO ve fichas de adjuntos',               ina,  $q$select 1 from public.ticket_attachments where ticket_id = 'ZT-3'$q$, false);
+  perform pg_temp.attempt('técnico ve los archivos de su ticket',                    tec1, $q$select 1 from storage.objects where name = 'ZT-1/f2-de-analista.pdf'$q$, true);
+  perform pg_temp.attempt('técnico NO ve archivos de tickets ajenos',                tec1, $q$select 1 from storage.objects where name = 'ZT-11/f3-ajeno.png'$q$, false);
+  perform pg_temp.attempt('usuario inactivo NO ve archivos',                         ina,  $q$select 1 from storage.objects where name = 'ZT-3/f4-del-inactivo.png'$q$, false);
+  perform pg_temp.attempt('técnico NO borra el archivo de otra persona',             tec1, $q$delete from storage.objects where name = 'ZT-1/f2-de-analista.pdf'$q$, false);
+  perform pg_temp.attempt('técnico NO borra la ficha de otra persona',               tec1, $q$delete from public.ticket_attachments where id = '00000000-0000-0000-0000-0000000000f2'$q$, false);
+  perform pg_temp.attempt('nadie edita la ficha de un adjunto',                      ana,  $q$update public.ticket_attachments set file_name = 'otro' where id = '00000000-0000-0000-0000-0000000000f1'$q$, false);
+  perform pg_temp.attempt('técnico borra su propio archivo',                         tec1, $q$delete from storage.objects where name = 'ZT-1/f1-captura.png'$q$, true);
+  perform pg_temp.attempt('técnico borra su propia ficha',                           tec1, $q$delete from public.ticket_attachments where id = '00000000-0000-0000-0000-0000000000f1'$q$, true);
+  perform pg_temp.attempt('analista borra el archivo de otra persona',               ana,  $q$delete from storage.objects where name = 'ZT-1/f2-de-analista.pdf'$q$, true);
+  perform pg_temp.attempt('analista borra la ficha de otra persona',                 ana,  $q$delete from public.ticket_attachments where id = '00000000-0000-0000-0000-0000000000f2'$q$, true);
 
   select string_agg((case when ok then '✔ ' else '✘ ' end) || lbl || '  [' || detail || ']', E'\n' order by id), count(*) filter (where not ok)
     into s, bad from pg_temp.res;
