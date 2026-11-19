@@ -84,7 +84,10 @@ Orden para llevar Monday de un entorno al siguiente:
    }
    ```
 6. **Publicar la función:** `supabase functions deploy monday-sync` (o crearla en el Dashboard pegando `supabase/functions/monday-sync/index.ts`).
-7. Recargar NovaDesk: en un ticket sin vínculo aparece el botón **＋ Crear ítem en Monday**. Mientras la función no esté lista, la tarjeta
+7. **Revisar la conexión:** entra como administrador a **Usuarios → 🔗 Integración con Monday → Revisar conexión**. Debe mostrar el nombre
+   del tablero y un ✅ en cada dato. Si un dato sale con ❌ (la columna no existe) o ⚠️ (tipo distinto), corrige ese ID o tipo en el secreto
+   `MONDAY_COLUMNS`; el desplegable «Columnas del tablero» lista los IDs reales para copiarlos. En DEV esta tarjeta muestra un tablero simulado.
+8. Recargar NovaDesk: en un ticket sin vínculo aparece el botón **＋ Crear ítem en Monday**. Mientras la función no esté lista, la tarjeta
    solo ofrece pegar el enlace y avisa que la creación automática no está activa.
 
 ## Cómo se mantiene al día

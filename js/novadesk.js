@@ -186,7 +186,7 @@ function touch() { lastActive = Date.now(); if (S.session) try { sessionStorage.
 function endSession(msg) {
   if (S.session) audit(msg || 'Cierre de sesión');
   save(); S.session = null; ui.open = null; ui.overlay = null; try { sessionStorage.removeItem(SESS_KEY); } catch {}
-  syncQ = syncQ.then(() => sb.auth.signOut()).catch(() => {}).then(() => { if (!S.session) { S.users = []; S.clients = []; S.tickets = []; S.audit = []; myRole = null; snap = { clients: {}, users: {}, tickets: {} }; mondayP = null; mondayOn = null; } });
+  syncQ = syncQ.then(() => sb.auth.signOut()).catch(() => {}).then(() => { if (!S.session) { S.users = []; S.clients = []; S.tickets = []; S.audit = []; myRole = null; snap = { clients: {}, users: {}, tickets: {} }; mondayP = null; mondayOn = null; ui.mondayCheck = null; } });
 }
 setInterval(() => { if (S && S.session && Date.now() - lastActive > IDLE) { endSession('Sesión cerrada por inactividad'); ui.loginError = 'Tu sesión se cerró por inactividad. Ingresa nuevamente.'; render(); } }, 20000);
 const theme = () => localStorage.getItem(THEME_KEY) || 'dark';
@@ -555,6 +555,25 @@ function viewMonday(t) {
         : mondayOn === false ? '<div class="muted sm" style="margin-top:6px">La creación automática de ítems aún no está activa en el servidor.</div>' : ''}`;
   return `<div class="card"><h3>Monday</h3>${body}</div>`;
 }
+/* Revisión de la conexión con Monday (solo administrador, pantalla Usuarios): la función del servidor compara los secretos
+   configurados (tablero y columnas) con las columnas reales del tablero y dice cuál falta o tiene el tipo equivocado. */
+const MONDAY_CAMPOS = { id: 'Número del ticket', client: 'Cliente', type: 'Tipo', priority: 'Prioridad', status: 'Estado', assignee: 'Técnico', created: 'Fecha de creación', resolved: 'Fecha de resolución', link: 'Enlace al ticket' };
+const MONDAY_ESTADO = { ok: '✅ Bien', sin_mapear: '— Sin mapear (no se manda)', no_existe: '❌ Esa columna no existe en el tablero', tipo_distinto: '⚠️ Tipo de columna distinto' };
+async function mondayCheck() {
+  ui.mondayCheck = { cargando: true }; render();
+  try { ui.mondayCheck = await callFn('monday-sync', { action: 'columns' }); } catch (e) { ui.mondayCheck = { error: e.message }; }
+  render();
+}
+function viewMondayAdmin() {
+  if (!linksReady) return '';
+  const c = ui.mondayCheck;
+  const res = !c ? '' : c.cargando ? '<div class="sug">⏳ Consultando a Monday…</div>' : c.error ? `<div class="alert bad">⚠️ ${esc(c.error)}</div>`
+    : `<div class="sug">Tablero conectado: <b>${esc(c.board)}</b>${c.appUrl ? '' : ' · <span class="muted">sin MONDAY_APP_URL (no se manda el enlace al ticket)</span>'}</div>
+      <div style="overflow:auto"><table style="margin-top:8px"><tr><th>Dato de NovaDesk</th><th>Columna del tablero</th><th>Resultado</th></tr>${c.mapping.map(m => `<tr><td>${esc(MONDAY_CAMPOS[m.field] || m.field)}</td><td>${m.id ? `<span class="mono">${esc(m.id)}</span>${m.titulo ? ` · ${esc(m.titulo)}` : ''}` : '<span class="muted">—</span>'}</td><td>${MONDAY_ESTADO[m.estado] || esc(m.estado)}${m.estado === 'tipo_distinto' ? ` (es «${esc(m.tipo_real)}», se esperaba «${esc(m.tipo)}»)` : ''}</td></tr>`).join('')}</table></div>
+      <details style="margin-top:8px"><summary class="muted sm" style="cursor:pointer">Columnas del tablero (ID · título · tipo)</summary>${c.columns.map(x => `<div class="sm mono">${esc(x.id)} · ${esc(x.title)} · ${esc(x.type)}</div>`).join('')}</details>`;
+  return `<div class="card" style="margin-top:16px"><div class="row between wrap"><h3 style="margin:0">🔗 Integración con Monday</h3><button class="btn sm" data-act="mondayCheck">Revisar conexión</button></div>
+    <div class="muted sm" style="margin:6px 0">Comprueba que el servidor esté conectado al tablero y que cada dato de NovaDesk tenga su columna. El token, el tablero y las columnas se configuran en Supabase (secretos), no aquí.</div>${res}</div>`;
+}
 
 /* ───────────── Utilidades de vista ───────────── */
 const visible = () => (staff() ? S.tickets : S.tickets.filter(t => t.assigneeId === S.session || t.createdBy === S.session));
@@ -732,6 +751,7 @@ function viewUsers() {
     <td>${!u.active ? '<span class="badge p2">Inactivo / pendiente</span>' : u.mustChange ? '<span class="badge p2">Clave temporal</span>' : '<span class="badge" style="color:var(--ok)">Activo</span>'}<div class="muted sm">${u.lastLogin ? 'Último acceso ' + rel(u.lastLogin) : 'Nunca ingresó'}</div></td>
     <td><div class="row"><button class="btn sm" data-act="userForm" data-id="${u.id}">Editar</button><button class="btn sm" data-act="resetPw" data-id="${u.id}">🔑 Restablecer clave</button></div></td></tr>`).join('')}</table></div>
   <div class="card" style="margin-top:16px"><h3>🛡️ Registro de seguridad (últimos 15 eventos)</h3>${S.audit.slice(-15).reverse().map(a => `<div class="row sm" style="padding:4px 0"><span class="muted" style="width:110px">${fdate(a.at)}</span><b style="width:150px">${esc(user(a.by)?.name || 'Anónimo')}</b><span>${esc(a.text)}</span></div>`).join('') || '<div class="muted">Sin eventos</div>'}</div>
+  ${viewMondayAdmin()}
   <div class="card" style="margin-top:16px"><h3>Matriz de permisos</h3><table><tr><th>Acción</th><th>👑 Admin</th><th>🧭 Analista</th><th>🛠️ Técnico</th></tr>
   ${[['Ver todos los tickets', 1, 1, 0], ['Ver tickets asignados / propios', 1, 1, 1], ['Crear tickets', 1, 1, 1], ['Adjuntar archivos y ver los de sus tickets', 1, 1, 1], ['Eliminar archivos de otras personas', 1, 1, 0], ['Vincular tickets con Monday', 1, 1, 0], ['Clasificar y asignar con Nova', 1, 1, 0], ['Cambiar prioridad / categoría', 1, 1, 0], ['Trabajar y resolver tickets', 1, 1, 1], ['Aprobar / rechazar cambios (CAB)', 1, 1, 0], ['Ejecutar cambios aprobados', 1, 1, 1], ['Gestionar clientes y usuarios', 1, 0, 0], ['Restablecer contraseñas', 1, 0, 0]].map(r => `<tr><td>${r[0]}</td>${r.slice(1).map(x => `<td>${x ? '✅' : '—'}</td>`).join('')}</tr>`).join('')}</table></div>`);
 }
@@ -902,6 +922,7 @@ const A = {
   mondayCreate: d => { const t = S.tickets.find(x => x.id === d.id); if (t && !t.monday) mondayCreate(t); },
   mondaySync: d => { syncMonday(d.id, false); },
   mondayUnlink: d => { const t = S.tickets.find(x => x.id === d.id); if (t?.monday) mondayUnlink(t); },
+  mondayCheck: () => { mondayCheck(); },
   unqueue: d => { keepDraft(); draftFiles.splice(+d.i, 1); render(); },
   status: d => { const t = S.tickets.find(x => x.id === d.id); if (setStatus(t, d.to)) { toast(`${t.id} → ${d.to}`); render(); } },
   cab: d => { const t = S.tickets.find(x => x.id === d.id); if (setStatus(t, d.d)) { toast(`${t.id}: ${d.d}`); render(); } },
@@ -1038,7 +1059,7 @@ document.addEventListener('change', e => {
   if (el.dataset.edit) { const k = el.dataset.edit; let v = el.value; if (k === 'priority') v = +v; if (k === 'assigneeId') v = v || null; t[k] = v; log(t, `${k === 'assigneeId' ? 'Asignado a ' + (user(v)?.name || 'nadie') : k === 'priority' ? 'Prioridad: ' + PRIO[v] : 'Categoría: ' + v}`); save(); toast('Ticket actualizado'); render(); }
   if (el.dataset.chg) { const k = el.dataset.chg; t.change = t.change || { impact: 2, complexity: 2, hours: 2, approvals: [] }; t.change[k] = k === 'start' ? (el.value ? new Date(el.value).getTime() : null) : ['impact', 'complexity'].includes(k) ? +el.value : el.value; log(t, `Plan del cambio actualizado (${k})`); save(); render(); }
 });
-const ADMIN_ACTS = new Set(['clientForm', 'userForm', 'newUser', 'resetPw']);
+const ADMIN_ACTS = new Set(['clientForm', 'userForm', 'newUser', 'resetPw', 'mondayCheck']);
 const STAFF_ACTS = new Set(['applyAI', 'assignAI', 'csv', 'cab', 'mondayLink', 'mondayCreate', 'mondaySync', 'mondayUnlink']);
 document.addEventListener('submit', async e => {
   e.preventDefault();

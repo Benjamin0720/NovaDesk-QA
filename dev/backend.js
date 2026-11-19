@@ -239,8 +239,14 @@ function mondaySync(uid, body) {
   const me = profile(uid), a = body.action;
   if (!me || !me.active) return json({ error: 'Tu cuenta está inactiva.' }, 403);
   if (a === 'status') return json({ configured: true });
-  if (a === 'columns') return me.role === 'admin' ? json({ board: 'Mesa de ayuda (simulado)', columns: ['name', 'client', 'type', 'priority', 'status', 'assignee', 'created', 'resolved', 'link'].map(id => ({ id, title: id, type: 'text' })) })
-    : json({ error: 'Solo un administrador puede hacer esto.' }, 403);
+  if (a === 'columns') {   // igual que la función real: devuelve las columnas del tablero y revisa el mapeo (aquí todo está bien)
+    if (me.role !== 'admin') return json({ error: 'Solo un administrador puede hacer esto.' }, 403);
+    const columns = [['name', 'Ticket', 'name'], ['text_id', 'N.º', 'text'], ['status_cliente', 'Cliente', 'status'], ['status_tipo', 'Tipo', 'status'], ['status_prioridad', 'Prioridad', 'status'],
+      ['status_estado', 'Estado', 'status'], ['text_tecnico', 'Técnico', 'text'], ['date_creado', 'Creado', 'date'], ['date_resuelto', 'Resuelto', 'date'], ['link_ticket', 'Enlace', 'link']].map(([id, title, type]) => ({ id, title, type }));
+    const campos = { id: 'text_id', client: 'status_cliente', type: 'status_tipo', priority: 'status_prioridad', status: 'status_estado', assignee: 'text_tecnico', created: 'date_creado', resolved: 'date_resuelto', link: 'link_ticket' };
+    const mapping = Object.entries(campos).map(([field, id]) => { const c = columns.find(x => x.id === id); return { field, id, tipo: c.type, titulo: c.title, tipo_real: c.type, estado: 'ok' }; });
+    return json({ board: 'Mesa de ayuda (simulado)', columns, mapping, appUrl: true, group: false });
+  }
   if (a !== 'create' && a !== 'sync') return json({ error: 'Acción desconocida.' }, 400);
   if (a === 'create' && !staff(uid)) return json({ error: 'Solo un analista o el administrador pueden crear ítems en Monday.' }, 403);
   const t = db.t.tickets.find(x => x.id === body.ticket_id);

@@ -171,7 +171,16 @@ Deno.serve(async (req) => {
       const d = await monday(cfg, 'query($b: [ID!]) { boards(ids: $b) { name columns { id title type } } }', { b: [cfg.board] });
       const b = d?.boards?.[0];
       if (!b) throw new UserError('Monday no encontró el tablero MONDAY_BOARD_ID (¿el token tiene acceso a él?).');
-      return json({ board: b.name, columns: b.columns });
+      // Revisa cada dato que NovaDesk manda contra las columnas reales del tablero: que la columna exista y sea del tipo declarado.
+      const columns: { id: string; title: string; type: string }[] = b.columns || [];
+      const mapping = FIELDS.map((field) => {
+        const c = cfg.cols[field];
+        if (!c) return { field, estado: 'sin_mapear' };
+        const real = columns.find((x) => x.id === c.id);
+        if (!real) return { field, id: c.id, tipo: c.type, estado: 'no_existe' };
+        return { field, id: c.id, tipo: c.type, titulo: real.title, tipo_real: real.type, estado: real.type === c.type ? 'ok' : 'tipo_distinto' };
+      });
+      return json({ board: b.name, columns, mapping, appUrl: !!cfg.appUrl, group: !!cfg.group });
     }
 
     if (action !== 'create' && action !== 'sync') return json({ error: 'Acción desconocida.' }, 400);
