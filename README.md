@@ -3,7 +3,8 @@
 Mesa de ayuda con Requerimientos (R), Incidentes (I) y Control de cambios (C).
 
 - **Documentación:** [guía del código](docs/guia-del-codigo.md) (qué hace cada archivo y cómo viaja la información) · [entornos y publicación](docs/entornos.md) ·
-  [integración con Monday](docs/integracion-monday.md) · [llevarlo a otro servidor o base de datos](docs/alojamiento-otro-servidor.md).
+  [integración con Monday](docs/integracion-monday.md) · [llevarlo a otro servidor o base de datos](docs/alojamiento-otro-servidor.md) ·
+  [guía de git para hacer los commits](docs/guia-de-git.md).
 - Front-end estático (HTML/CSS/JS, sin build). Los datos y el login viven en **Supabase** (PostgreSQL + Auth, plan gratuito).
 - Para trabajar en local sirve la carpeta con cualquier servidor estático (`.claude/serve.ps1` levanta uno en el puerto 8123). Se publica con GitHub Pages.
 - Configuración: `js/config.js` (URL del proyecto y clave *publishable* de cada entorno; son públicas por diseño). Nunca pongas ahí la clave *secret*.
