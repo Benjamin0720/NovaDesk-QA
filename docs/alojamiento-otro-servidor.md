@@ -150,11 +150,11 @@ Hazlos **primero con QA** (un servidor/proyecto de ensayo) y repite en Producci�
 
 ---
 
-## 8. Qué puedo hacer yo y qué no
+## 8. Qué se puede preparar con anticipación y qué depende de la empresa
 
-**Puedo preparar, a pedido:** los cambios de código del camino A o B (`js/config.js`, copia local de `supabase-js`, adaptar `scripts/flujo.ps1` al nuevo destino), un script de respaldo y restauración
+**Se puede preparar de antemano (desarrollo):** los cambios de código del camino A o B (`js/config.js`, copia local de `supabase-js`, adaptar `scripts/flujo.ps1` al nuevo destino), un script de respaldo y restauración
 (`pg_dump` + archivos), un `docker-compose` y una guía de instalación basados en la documentación oficial de Supabase, y —si se aprueba el camino C— un diseño
 del backend y de la capa de datos.
 
-**No puedo:** crear ni administrar servidores o cuentas de la empresa, ni cargar contraseñas, tokens o claves por ti; esas partes las haces tú o TI. Y las **pruebas de aceptación y la QA** las haces tú, como acordamos;
-yo solo te dejo la lista de qué probar (paso 9).
+**Depende de la empresa o de TI:** aprobar el camino, crear y administrar los servidores y las cuentas, y cargar contraseñas, tokens y claves (las administra quien corresponda y **nunca** van en el repositorio).
+Las **pruebas de aceptación y la QA** las hace quien mantiene el sistema; el paso 9 deja la lista de qué probar.
