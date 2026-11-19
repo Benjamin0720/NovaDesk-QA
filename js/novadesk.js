@@ -64,7 +64,7 @@ const ticketRow = t => ({ id: t.id, type: t.type, title: t.title, description: t
   change_hours: t.change?.hours ?? null, change_rollback: t.change?.rollback ?? null });
 function fromTicket(r) {
   const t = { id: r.id, type: r.type, title: r.title, desc: r.description, clientId: r.client_id, requester: r.requester, priority: r.priority, status: r.status, category: r.category,
-    assigneeId: r.assignee_id, createdBy: r.created_by, createdAt: toMs(r.created_at), updatedAt: toMs(r.updated_at), resolvedAt: toMs(r.resolved_at), ai: r.ai_confidence, comments: [], history: [], attachments: [] };
+    assigneeId: r.assignee_id, createdBy: r.created_by, createdAt: toMs(r.created_at), updatedAt: toMs(r.updated_at), resolvedAt: toMs(r.resolved_at), ai: r.ai_confidence, comments: [], history: [], attachments: [], monday: null };
   if (r.type === 'C') t.change = { impact: r.change_impact || 2, complexity: r.change_complexity || 2, start: toMs(r.change_start), hours: r.change_hours == null ? 2 : Number(r.change_hours), rollback: r.change_rollback || '', approvals: [] };
   return t;
 }
@@ -82,11 +82,19 @@ async function fetchAll(table, order) {
 }
 async function fetchData(isAdmin) {
   const audit = isAdmin ? sb.from('audit_log').select('*').order('created_at', { ascending: false }).limit(200).then(r => { if (r.error) throw r.error; return r.data.reverse(); }) : [];
-  const [cl, us, tk, cm, hs, ap, fa, au] = await Promise.all([fetchAll('clients', ['name']), fetchAll('profiles', ['name']), fetchAll('tickets', ['created_at', 'id']),
+  const [cl, us, tk, cm, hs, ap, fa, lk, au] = await Promise.all([fetchAll('clients', ['name']), fetchAll('profiles', ['name']), fetchAll('tickets', ['created_at', 'id']),
     fetchAll('ticket_comments', ['created_at', 'id']), fetchAll('ticket_history', ['created_at', 'id']), fetchAll('change_approvals', ['created_at', 'id']),
-    fetchAll('ticket_attachments', ['created_at', 'id']), audit]);
-  return { cl, us, tk, cm, hs, ap, fa, au };
+    fetchAll('ticket_attachments', ['created_at', 'id']), fetchLinks(), audit]);
+  return { cl, us, tk, cm, hs, ap, fa, lk, au };
 }
+/* Los vínculos con Monday (docs/migracion-05-monday.sql) son opcionales: si esa migración aún no se ejecutó en la base, la app
+   funciona igual y simplemente no muestra la tarjeta de Monday. */
+let linksReady = true;
+async function fetchLinks() {
+  try { const r = await fetchAll('ticket_links', ['created_at', 'id']); linksReady = true; return r; }
+  catch (e) { if (e.code === 'PGRST205' || e.code === '42P01') { linksReady = false; return []; } throw e; }
+}
+const fromLink = l => ({ id: l.id, url: l.url, boardId: l.board_id, itemId: l.item_id, by: l.linked_by, at: toMs(l.created_at), syncedAt: toMs(l.synced_at), error: l.sync_error || '' });
 function applyData(d) {
   S.clients = d.cl.map(fromClient); S.users = d.us.map(fromUser); S.tickets = d.tk.map(fromTicket);
   const by = Object.fromEntries(S.tickets.map(t => [t.id, t]));
@@ -94,6 +102,8 @@ function applyData(d) {
   d.hs.forEach(h => by[h.ticket_id]?.history.push({ at: toMs(h.created_at), by: h.actor_id, text: h.text }));
   d.ap.forEach(a => by[a.ticket_id]?.change?.approvals.push({ by: a.approver_id, at: toMs(a.created_at), decision: a.decision, note: a.note }));
   d.fa.forEach(a => by[a.ticket_id]?.attachments.push({ id: a.id, name: a.file_name, mime: a.mime_type, size: Number(a.size_bytes), path: a.storage_path, by: a.uploader_id, at: toMs(a.created_at) }));
+  d.lk.forEach(l => { if (by[l.ticket_id]) by[l.ticket_id].monday = fromLink(l); });
+  S.tickets.forEach(t => { if (t.monday) monSig[t.id] = mondaySig(t); });   // lo que se lee del servidor se da por ya sincronizado
   S.audit = d.au.map(a => ({ at: toMs(a.created_at), by: a.actor_id, text: a.text, sent: true }));
   snap = { clients: {}, users: {}, tickets: {} };
   S.clients.forEach(c => { snap.clients[c.id] = JSON.stringify(clientRow(c)); });
@@ -117,6 +127,7 @@ async function pushChanges() {
     if (newC.length) { await run(sb.from('ticket_comments').insert(newC.map(c => ({ id: c.id, ticket_id: t.id, author_id: c.by, body: c.text, internal: !!c.internal, created_at: toIso(c.at) })))); newC.forEach(c => s.cids.add(c.id)); }
     const aps = t.change?.approvals || [], newA = aps.slice(s.na);
     if (newA.length) { await run(sb.from('change_approvals').insert(newA.map(a => ({ ticket_id: t.id, approver_id: a.by, decision: a.decision, note: a.note || '', created_at: toIso(a.at) })))); s.na = aps.length; }
+    queueMonday(t);   // si el ticket tiene un ítem en Monday y cambió algo que Monday muestra, se actualiza en segundo plano
   }
   const newAu = S.audit.filter(a => !a.sent && a.by);
   if (newAu.length) { await run(sb.from('audit_log').insert(newAu.map(a => ({ actor_id: a.by, text: a.text, created_at: toIso(a.at) })))); newAu.forEach(a => { a.sent = true; }); }
@@ -143,6 +154,10 @@ async function enter(uid_, fresh) {
   myRole = p.role; applyData(await fetchData(p.role === 'admin'));
   S.session = uid_;
   if (fresh) { me().lastLogin = Date.now(); ui.view = 'dashboard'; ui.open = null; ui.overlay = null; audit('Inicio de sesión', uid_); sb.rpc('touch_login').then(() => {}, () => {}); save(); }
+  /* Enlace directo a un ticket (https://…/#I-0001), como el que NovaDesk pone en la columna «link» de Monday: lo abre al entrar. */
+  let hashId = ''; try { hashId = decodeURIComponent(location.hash.slice(1)); } catch {}
+  const linked = hashId && S.tickets.find(t => t.id === hashId);
+  if (linked && visible().includes(linked)) ui.open = linked.id;
   touch();
 }
 async function boot() {
@@ -171,7 +186,7 @@ function touch() { lastActive = Date.now(); if (S.session) try { sessionStorage.
 function endSession(msg) {
   if (S.session) audit(msg || 'Cierre de sesión');
   save(); S.session = null; ui.open = null; ui.overlay = null; try { sessionStorage.removeItem(SESS_KEY); } catch {}
-  syncQ = syncQ.then(() => sb.auth.signOut()).catch(() => {}).then(() => { if (!S.session) { S.users = []; S.clients = []; S.tickets = []; S.audit = []; myRole = null; snap = { clients: {}, users: {}, tickets: {} }; } });
+  syncQ = syncQ.then(() => sb.auth.signOut()).catch(() => {}).then(() => { if (!S.session) { S.users = []; S.clients = []; S.tickets = []; S.audit = []; myRole = null; snap = { clients: {}, users: {}, tickets: {} }; mondayP = null; mondayOn = null; } });
 }
 setInterval(() => { if (S && S.session && Date.now() - lastActive > IDLE) { endSession('Sesión cerrada por inactividad'); ui.loginError = 'Tu sesión se cerró por inactividad. Ingresa nuevamente.'; render(); } }, 20000);
 const theme = () => localStorage.getItem(THEME_KEY) || 'dark';
@@ -466,6 +481,81 @@ function viewFiles(t) {
     <div class="muted sm" style="margin-top:6px">Arrastra archivos aquí o pega una captura (Ctrl+V). ${FILE_HINT}</div></div>`;
 }
 
+/* ───────────── Monday ─────────────
+   Cada ticket puede estar vinculado a UN ítem de Monday (tabla ticket_links, docs/migracion-05-monday.sql). El vínculo lo puede pegar un
+   analista/administrador a mano, o crearlo la Edge Function «monday-sync» (docs/integracion-monday.md), que también mantiene el ítem
+   al día cuando el ticket cambia. Es en un solo sentido: NovaDesk → Monday. El token de Monday solo existe en el servidor. */
+const monSig = {}, monTimer = {};   // monSig: lo último que Monday ya sabe de cada ticket vinculado
+let mondayP = null, mondayOn = null, mondayBusy = false;   // mondayOn: ¿está la función lista en el servidor? (null = sin consultar)
+const mondaySig = t => [t.title, t.clientId, t.type, t.priority, t.status, t.assigneeId, t.resolvedAt].join('|');
+/* Pregunta una sola vez por sesión si el servidor tiene la integración activa (si la función no existe o no está configurada → no). */
+function mondayProbe() {
+  if (!mondayP) mondayP = callFn('monday-sync', { action: 'status' }).then(r => !!r.configured, () => false).then(v => { mondayOn = v; render(); return v; });
+  return mondayP;
+}
+/* Acepta solo enlaces https de monday.com con tablero e ítem (…/boards/123/pulses/456 o …/boards/123/views/9/pulses/456). */
+function parseMondayUrl(raw) {
+  let u; try { u = new URL(String(raw).trim()); } catch { return null; }
+  if (u.protocol !== 'https:' || u.username || u.password || !/^[a-z0-9-]+\.monday\.com$/i.test(u.hostname)) return null;
+  const board = /\/boards\/(\d{1,20})(?:\/|$)/.exec(u.pathname), item = /\/(?:pulses|items)\/(\d{1,20})(?:\/|$)/.exec(u.pathname);
+  const url = u.origin + u.pathname;
+  return board && item && url.length <= 500 ? { board_id: board[1], item_id: item[1], url } : null;
+}
+function queueMonday(t) {
+  if (!t.monday || !linksReady) return;
+  const sig = mondaySig(t); if (monSig[t.id] === sig) return;
+  monSig[t.id] = sig; clearTimeout(monTimer[t.id]);
+  monTimer[t.id] = setTimeout(() => syncMonday(t.id, true), 2000);   // junta varios cambios seguidos en una sola actualización
+}
+async function syncMonday(id, quiet) {
+  const t = S.tickets.find(x => x.id === id); if (!t?.monday) return;
+  await syncQ;   // el ticket ya debe estar guardado en el servidor: la función lee los datos desde ahí
+  if (!(await mondayProbe())) { if (!quiet) toast('La sincronización con Monday aún no está activa en el servidor'); return; }
+  try {
+    const r = await callFn('monday-sync', { action: 'sync', ticket_id: id });
+    if (r.skipped) { if (!quiet) toast('Ese ítem es de otro tablero: solo se usa como referencia, no se actualiza'); return; }
+    t.monday.syncedAt = Date.now(); t.monday.error = ''; if (!quiet) toast('Monday actualizado');
+  } catch (e) { t.monday.error = e.message; if (!quiet) toast('No se pudo sincronizar con Monday: ' + e.message); else console.warn('monday', e); }
+  render();
+}
+async function mondayLink(t, raw) {
+  const p = parseMondayUrl(raw);
+  if (!p) return toast('Pega el enlace completo de un ítem de Monday (https://tu-cuenta.monday.com/boards/…/pulses/…)');
+  const { data, error } = await sb.from('ticket_links').insert({ ticket_id: t.id, provider: 'monday', board_id: p.board_id, item_id: p.item_id, url: p.url, linked_by: S.session }).select().single();
+  if (error) return toast(error.code === '23505' ? 'Este ticket ya tiene un ítem de Monday vinculado' : 'No se pudo vincular con Monday: ' + error.message);
+  // Al guardar, queueMonday lo sincroniza: si el ítem es del tablero de Mesa de ayuda queda al día; si es de otro tablero, no se toca.
+  t.monday = fromLink(data); log(t, 'Vinculó el ticket con un ítem de Monday'); save(); toast('Ticket vinculado con Monday'); render();
+}
+async function mondayCreate(t) {
+  if (mondayBusy) return; mondayBusy = true; render();
+  try {
+    await syncQ;   // el ticket tiene que existir ya en el servidor
+    const r = await callFn('monday-sync', { action: 'create', ticket_id: t.id });
+    t.monday = fromLink(r.link); monSig[t.id] = mondaySig(t); log(t, 'Creó el ítem en Monday'); save(); toast('Ítem creado en Monday');
+  } catch (e) { toast('No se pudo crear en Monday: ' + e.message); }
+  finally { mondayBusy = false; render(); }
+}
+async function mondayUnlink(t) {
+  if (!confirm('¿Quitar el vínculo con Monday? El ítem en Monday NO se borra; solo deja de estar enlazado a este ticket.')) return;
+  const r = await sb.from('ticket_links').delete().eq('id', t.monday.id).select();
+  if (r.error) return toast('No se pudo quitar el vínculo: ' + r.error.message);
+  if (!r.data.length) return toast('Solo un analista o el administrador pueden quitar el vínculo');
+  t.monday = null; delete monSig[t.id]; clearTimeout(monTimer[t.id]); log(t, 'Quitó el vínculo con Monday'); save(); render();
+}
+function viewMonday(t) {
+  const m = t.monday, ed = staff();
+  if (!linksReady || (!m && !ed)) return '';
+  if (ed && mondayOn === null) mondayProbe();
+  const body = m
+    ? `<div class="sug row between"><span style="min-width:0;overflow-wrap:anywhere">🔗 ${/^https:\/\/[a-z0-9-]+\.monday\.com\//i.test(m.url) ? `<a class="lnk" href="${esc(m.url)}" target="_blank" rel="noopener noreferrer">Abrir el ítem en Monday</a>` : 'Enlace no válido'} <span class="muted sm">${esc(user(m.by)?.name || '—')} · ${rel(m.at)}</span></span>${ed ? `<button class="btn sm" data-act="mondayUnlink" data-id="${t.id}" title="Quitar el vínculo">✕</button>` : ''}</div>
+      ${m.error ? `<div class="alert bad sm">⚠️ No se pudo sincronizar: ${esc(m.error)}</div>` : m.syncedAt ? `<div class="muted sm">Sincronizado ${rel(m.syncedAt)}</div>` : mondayOn ? '<div class="muted sm">Aún sin sincronizar</div>' : ''}
+      ${ed && mondayOn ? `<div class="row" style="margin-top:6px"><button class="btn sm" data-act="mondaySync" data-id="${t.id}">↻ Sincronizar ahora</button></div>` : ''}`
+    : `<div class="row"><input id="mdUrl" class="grow" autocomplete="off" placeholder="Pega el enlace del ítem de Monday"><button class="btn sm" data-act="mondayLink" data-id="${t.id}">Vincular</button></div>
+      ${mondayOn ? `<div class="row" style="margin-top:8px"><button class="btn sm pri" data-act="mondayCreate" data-id="${t.id}" ${mondayBusy ? 'disabled' : ''}>${mondayBusy ? '⏳ Creando…' : '＋ Crear ítem en Monday'}</button></div>`
+        : mondayOn === false ? '<div class="muted sm" style="margin-top:6px">La creación automática de ítems aún no está activa en el servidor.</div>' : ''}`;
+  return `<div class="card"><h3>Monday</h3>${body}</div>`;
+}
+
 /* ───────────── Utilidades de vista ───────────── */
 const visible = () => (staff() ? S.tickets : S.tickets.filter(t => t.assigneeId === S.session || t.createdBy === S.session));
 const fdate = ts => new Date(ts).toLocaleString('es-CL', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
@@ -643,7 +733,7 @@ function viewUsers() {
     <td><div class="row"><button class="btn sm" data-act="userForm" data-id="${u.id}">Editar</button><button class="btn sm" data-act="resetPw" data-id="${u.id}">🔑 Restablecer clave</button></div></td></tr>`).join('')}</table></div>
   <div class="card" style="margin-top:16px"><h3>🛡️ Registro de seguridad (últimos 15 eventos)</h3>${S.audit.slice(-15).reverse().map(a => `<div class="row sm" style="padding:4px 0"><span class="muted" style="width:110px">${fdate(a.at)}</span><b style="width:150px">${esc(user(a.by)?.name || 'Anónimo')}</b><span>${esc(a.text)}</span></div>`).join('') || '<div class="muted">Sin eventos</div>'}</div>
   <div class="card" style="margin-top:16px"><h3>Matriz de permisos</h3><table><tr><th>Acción</th><th>👑 Admin</th><th>🧭 Analista</th><th>🛠️ Técnico</th></tr>
-  ${[['Ver todos los tickets', 1, 1, 0], ['Ver tickets asignados / propios', 1, 1, 1], ['Crear tickets', 1, 1, 1], ['Adjuntar archivos y ver los de sus tickets', 1, 1, 1], ['Eliminar archivos de otras personas', 1, 1, 0], ['Clasificar y asignar con Nova', 1, 1, 0], ['Cambiar prioridad / categoría', 1, 1, 0], ['Trabajar y resolver tickets', 1, 1, 1], ['Aprobar / rechazar cambios (CAB)', 1, 1, 0], ['Ejecutar cambios aprobados', 1, 1, 1], ['Gestionar clientes y usuarios', 1, 0, 0], ['Restablecer contraseñas', 1, 0, 0]].map(r => `<tr><td>${r[0]}</td>${r.slice(1).map(x => `<td>${x ? '✅' : '—'}</td>`).join('')}</tr>`).join('')}</table></div>`);
+  ${[['Ver todos los tickets', 1, 1, 0], ['Ver tickets asignados / propios', 1, 1, 1], ['Crear tickets', 1, 1, 1], ['Adjuntar archivos y ver los de sus tickets', 1, 1, 1], ['Eliminar archivos de otras personas', 1, 1, 0], ['Vincular tickets con Monday', 1, 1, 0], ['Clasificar y asignar con Nova', 1, 1, 0], ['Cambiar prioridad / categoría', 1, 1, 0], ['Trabajar y resolver tickets', 1, 1, 1], ['Aprobar / rechazar cambios (CAB)', 1, 1, 0], ['Ejecutar cambios aprobados', 1, 1, 1], ['Gestionar clientes y usuarios', 1, 0, 0], ['Restablecer contraseñas', 1, 0, 0]].map(r => `<tr><td>${r[0]}</td>${r.slice(1).map(x => `<td>${x ? '✅' : '—'}</td>`).join('')}</tr>`).join('')}</table></div>`);
 }
 
 function novaPanel(a, cur) {
@@ -718,6 +808,7 @@ function viewDrawer(t) {
       <span>Categoría</span>${ed ? `<select data-edit="category">${CATS.map(c => opt(c, c, t.category)).join('')}</select>` : esc(t.category)}
       <span>Asignado</span>${ed ? `<select data-edit="assigneeId">${opt('', '— Sin asignar —', t.assigneeId || '')}${assignable().map(u => opt(u.id, uLabel(u), t.assigneeId)).join('')}</select>` : `<div class="row">${avatar(user(t.assigneeId))} ${esc(user(t.assigneeId)?.name || '—')}</div>`}
       <span>SLA</span>${slaB(t)}</div></div>
+    ${viewMonday(t)}
     ${novaPanel(a, ed ? t : null)}</div></div></div></div>`;
 }
 
@@ -807,6 +898,10 @@ const A = {
   newtype: d => { ui.view = 'new'; ui.draft = { type: d.v }; draftFiles = []; render(); },
   openFile: d => { const a = S.tickets.find(x => x.id === ui.open)?.attachments.find(x => x.id === d.id); if (a) openFile(a); },
   delFile: d => { const t = S.tickets.find(x => x.id === ui.open), a = t?.attachments.find(x => x.id === d.id); if (a) dropFile(t, a); },
+  mondayLink: d => { const t = S.tickets.find(x => x.id === d.id); if (t && !t.monday) mondayLink(t, $('#mdUrl')?.value || ''); },
+  mondayCreate: d => { const t = S.tickets.find(x => x.id === d.id); if (t && !t.monday) mondayCreate(t); },
+  mondaySync: d => { syncMonday(d.id, false); },
+  mondayUnlink: d => { const t = S.tickets.find(x => x.id === d.id); if (t?.monday) mondayUnlink(t); },
   unqueue: d => { keepDraft(); draftFiles.splice(+d.i, 1); render(); },
   status: d => { const t = S.tickets.find(x => x.id === d.id); if (setStatus(t, d.to)) { toast(`${t.id} → ${d.to}`); render(); } },
   cab: d => { const t = S.tickets.find(x => x.id === d.id); if (setStatus(t, d.d)) { toast(`${t.id}: ${d.d}`); render(); } },
@@ -862,9 +957,10 @@ async function setOwnPassword(u, p1, p2, msg) {
   if (error) return toast(/different|same/i.test(error.message) ? 'La nueva contraseña debe ser distinta a la actual' : 'No se pudo cambiar la contraseña: ' + error.message), false;
   await sb.rpc('clear_must_change'); u.mustChange = false; audit(msg, u.id); save(); toast('Contraseña actualizada'); return true;
 }
-/* Crear usuarios y restablecer claves: solo lo puede el administrador, y lo hace la Edge Function «admin-users» en el servidor. */
-async function adminUsers(body) {
-  const { data, error } = await sb.functions.invoke('admin-users', { body });
+/* Llama a una Edge Function (código que corre en el servidor con claves que nunca llegan a esta página) y devuelve su respuesta;
+   si responde con error, lanza un Error con el mensaje que mandó la función. */
+async function callFn(name, body) {
+  const { data, error } = await sb.functions.invoke(name, { body });
   if (error) {
     let msg = error.message;
     try { const j = await error.context.json(); if (j?.error) msg = j.error; } catch {}
@@ -873,6 +969,8 @@ async function adminUsers(body) {
   if (data?.error) throw new Error(data.error);
   return data;
 }
+/* Crear usuarios y restablecer claves: solo lo puede el administrador, y lo hace la Edge Function «admin-users» en el servidor. */
+const adminUsers = body => callFn('admin-users', body);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function login(fd) {
   const un = fd.get('username').trim().toLowerCase(), pw = fd.get('password');
@@ -941,7 +1039,7 @@ document.addEventListener('change', e => {
   if (el.dataset.chg) { const k = el.dataset.chg; t.change = t.change || { impact: 2, complexity: 2, hours: 2, approvals: [] }; t.change[k] = k === 'start' ? (el.value ? new Date(el.value).getTime() : null) : ['impact', 'complexity'].includes(k) ? +el.value : el.value; log(t, `Plan del cambio actualizado (${k})`); save(); render(); }
 });
 const ADMIN_ACTS = new Set(['clientForm', 'userForm', 'newUser', 'resetPw']);
-const STAFF_ACTS = new Set(['applyAI', 'assignAI', 'csv', 'cab']);
+const STAFF_ACTS = new Set(['applyAI', 'assignAI', 'csv', 'cab', 'mondayLink', 'mondayCreate', 'mondaySync', 'mondayUnlink']);
 document.addEventListener('submit', async e => {
   e.preventDefault();
   if (e.target.id === 'authForm') return submitAuth(e.target);

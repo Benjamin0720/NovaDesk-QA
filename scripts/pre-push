@@ -1,0 +1,27 @@
+#!/bin/sh
+# NovaDesk - candado de PRODUCCION: el remoto "origin" (Produccion) solo recibe commits que ya estan en QA (remoto "qa").
+# Lo instala .\scripts\flujo.cmd configurar. Saltarselo con --no-verify rompe la regla DEV -> QA -> PRODUCCION: no lo hagas.
+remote="$1"
+[ "$remote" = "origin" ] || exit 0
+
+zero="0000000000000000000000000000000000000000"
+if ! git remote get-url qa >/dev/null 2>&1; then
+  echo "X PRODUCCION BLOQUEADA: no hay remoto 'qa'. Ejecuta: .\\scripts\\flujo.cmd configurar -UrlQA <url del repositorio de QA>" >&2
+  exit 1
+fi
+if ! git fetch qa main --quiet 2>/dev/null; then
+  echo "X PRODUCCION BLOQUEADA: no se pudo consultar QA (sin internet, o QA todavia esta vacio)." >&2
+  exit 1
+fi
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in refs/heads/*) ;; *) continue ;; esac   # solo se vigilan las ramas
+  [ "$local_sha" = "$zero" ] && continue                         # borrar una rama no publica codigo
+  if ! git merge-base --is-ancestor "$local_sha" refs/remotes/qa/main 2>/dev/null; then
+    echo "X PRODUCCION BLOQUEADA: $local_ref ($local_sha) todavia no esta en QA." >&2
+    echo "  Flujo obligatorio: DEV -> QA -> PRODUCCION." >&2
+    echo "  1) .\\scripts\\flujo.cmd qa    2) prueba en QA    3) .\\scripts\\flujo.cmd produccion" >&2
+    exit 1
+  fi
+done
+exit 0

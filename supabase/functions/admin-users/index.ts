@@ -22,11 +22,21 @@ function tempPassword(): string {
   return /[a-z]/.test(s) && /[A-Z]/.test(s) ? s : tempPassword();
 }
 
+/** Clave secreta del proyecto: la «service role» antigua o, en proyectos nuevos, la primera de SUPABASE_SECRET_KEYS (JSON). Nunca sale del servidor. */
+function secretKey(): string {
+  const legacy = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (legacy) return legacy;
+  try {
+    const keys = JSON.parse(Deno.env.get('SUPABASE_SECRET_KEYS') || '{}');
+    return String(keys.default || Object.values(keys)[0] || '');
+  } catch { return ''; }
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return json({ error: 'Método no permitido' }, 405);
 
-  const admin = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!, {
+  const admin = createClient(Deno.env.get('SUPABASE_URL')!, secretKey(), {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 

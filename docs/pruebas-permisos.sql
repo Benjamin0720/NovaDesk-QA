@@ -1,4 +1,4 @@
--- NovaDesk · pruebas de los permisos de docs/migracion-03-permisos.sql y docs/migracion-04-adjuntos.sql (aplicar ambas antes).
+-- NovaDesk · pruebas de los permisos de docs/migracion-03-permisos.sql, docs/migracion-04-adjuntos.sql y docs/migracion-05-monday.sql (aplicar las tres antes).
 --
 -- SON SEGURAS: crean usuarios y tickets de mentira dentro de una transacción que termina con un error a propósito, así que
 -- no queda nada guardado. El informe aparece en ese mensaje de error («RESULTADO»): cada línea es ✔ (salió lo esperado) o
@@ -217,6 +217,44 @@ begin
   perform pg_temp.attempt('técnico borra su propia ficha',                           tec1, $q$delete from public.ticket_attachments where id = '00000000-0000-0000-0000-0000000000f1'$q$, true);
   perform pg_temp.attempt('analista borra el archivo de otra persona',               ana,  $q$delete from storage.objects where name = 'ZT-1/f2-de-analista.pdf'$q$, true);
   perform pg_temp.attempt('analista borra la ficha de otra persona',                 ana,  $q$delete from public.ticket_attachments where id = '00000000-0000-0000-0000-0000000000f2'$q$, true);
+
+  -- ───── Vínculos con Monday (docs/migracion-05-monday.sql) ─────
+  insert into public.ticket_links (id, ticket_id, board_id, item_id, url, linked_by) values
+    ('00000000-0000-0000-0000-0000000000e1', 'ZT-1',  '111', '1001', 'https://prueba.monday.com/boards/111/pulses/1001', ana),
+    ('00000000-0000-0000-0000-0000000000e2', 'ZT-11', '111', '1002', 'https://prueba.monday.com/boards/111/pulses/1002', ana),
+    ('00000000-0000-0000-0000-0000000000e3', 'ZT-3',  '111', '1003', 'https://prueba.monday.com/boards/111/pulses/1003', ana);
+
+  perform pg_temp.verify('los vínculos con Monday tienen RLS activa',                (select relrowsecurity from pg_class where oid = 'public.ticket_links'::regclass));
+  perform pg_temp.attempt('analista vincula un ticket con Monday',                   ana,  format($q$insert into public.ticket_links (ticket_id, board_id, item_id, url, linked_by)
+    values ('ZT-2', '111', '2001', 'https://prueba.monday.com/boards/111/pulses/2001', %L)$q$, ana), true);
+  perform pg_temp.attempt('un ticket NO admite un segundo ítem de Monday',           ana,  format($q$insert into public.ticket_links (ticket_id, board_id, item_id, url, linked_by)
+    values ('ZT-2', '111', '2002', 'https://prueba.monday.com/boards/111/pulses/2002', %L)$q$, ana), false);
+  perform pg_temp.attempt('administrador vincula un cambio con Monday',              adm,  format($q$insert into public.ticket_links (ticket_id, board_id, item_id, url, linked_by)
+    values ('ZC-2', '111', '2003', 'https://prueba.monday.com/boards/111/pulses/2003', %L)$q$, adm), true);
+  perform pg_temp.attempt('técnico NO vincula ni siquiera su propio ticket',         tec1, format($q$insert into public.ticket_links (ticket_id, board_id, item_id, url, linked_by)
+    values ('ZT-4', '111', '2004', 'https://prueba.monday.com/boards/111/pulses/2004', %L)$q$, tec1), false);
+  perform pg_temp.attempt('usuario inactivo NO vincula',                             ina,  format($q$insert into public.ticket_links (ticket_id, board_id, item_id, url, linked_by)
+    values ('ZT-4', '111', '2005', 'https://prueba.monday.com/boards/111/pulses/2005', %L)$q$, ina), false);
+  perform pg_temp.attempt('analista NO vincula a nombre de otra persona',            ana,  format($q$insert into public.ticket_links (ticket_id, board_id, item_id, url, linked_by)
+    values ('ZT-4', '111', '2006', 'https://prueba.monday.com/boards/111/pulses/2006', %L)$q$, adm), false);
+  perform pg_temp.attempt('NO se acepta un enlace que no sea de monday.com',         ana,  format($q$insert into public.ticket_links (ticket_id, board_id, item_id, url, linked_by)
+    values ('ZT-4', '111', '2007', 'https://ejemplo.com/boards/111/pulses/2007', %L)$q$, ana), false);
+  perform pg_temp.attempt('NO se acepta un enlace disfrazado de monday.com',         ana,  format($q$insert into public.ticket_links (ticket_id, board_id, item_id, url, linked_by)
+    values ('ZT-4', '111', '2008', 'https://monday.com.ejemplo.com/boards/111/pulses/2008', %L)$q$, ana), false);
+  perform pg_temp.attempt('NO se acepta un enlace sin cifrar (http)',                ana,  format($q$insert into public.ticket_links (ticket_id, board_id, item_id, url, linked_by)
+    values ('ZT-4', '111', '2009', 'http://prueba.monday.com/boards/111/pulses/2009', %L)$q$, ana), false);
+  perform pg_temp.attempt('NO se acepta un enlace javascript:',                      ana,  format($q$insert into public.ticket_links (ticket_id, board_id, item_id, url, linked_by)
+    values ('ZT-4', '111', '2010', 'javascript:alert(1)//.monday.com/', %L)$q$, ana), false);
+  perform pg_temp.attempt('el navegador NO marca un vínculo como ya sincronizado',   ana,  format($q$insert into public.ticket_links (ticket_id, board_id, item_id, url, linked_by, synced_at)
+    values ('ZT-4', '111', '2011', 'https://prueba.monday.com/boards/111/pulses/2011', %L, now())$q$, ana), false);
+  perform pg_temp.attempt('técnico ve el vínculo de su ticket',                      tec1, $q$select 1 from public.ticket_links where ticket_id = 'ZT-1'$q$, true);
+  perform pg_temp.attempt('técnico NO ve vínculos de tickets ajenos',                tec1, $q$select 1 from public.ticket_links where ticket_id = 'ZT-11'$q$, false);
+  perform pg_temp.attempt('usuario inactivo NO ve vínculos',                         ina,  $q$select 1 from public.ticket_links where ticket_id = 'ZT-3'$q$, false);
+  perform pg_temp.attempt('analista ve los vínculos de cualquier ticket',            ana,  $q$select 1 from public.ticket_links where ticket_id = 'ZT-11'$q$, true);
+  perform pg_temp.attempt('nadie edita un vínculo (ni el analista)',                 ana,  $q$update public.ticket_links set url = 'https://otra.monday.com/boards/1/pulses/1' where id = '00000000-0000-0000-0000-0000000000e1'$q$, false);
+  perform pg_temp.attempt('nadie edita un vínculo (ni el administrador)',            adm,  $q$update public.ticket_links set sync_error = 'x' where id = '00000000-0000-0000-0000-0000000000e1'$q$, false);
+  perform pg_temp.attempt('técnico NO quita un vínculo',                             tec1, $q$delete from public.ticket_links where id = '00000000-0000-0000-0000-0000000000e1'$q$, false);
+  perform pg_temp.attempt('analista quita un vínculo',                               ana,  $q$delete from public.ticket_links where id = '00000000-0000-0000-0000-0000000000e1'$q$, true);
 
   select string_agg((case when ok then '✔ ' else '✘ ' end) || lbl || '  [' || detail || ']', E'\n' order by id), count(*) filter (where not ok)
     into s, bad from pg_temp.res;

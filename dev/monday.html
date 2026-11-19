@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monday (simulado) · Mesa de ayuda</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 20px; background: #0b0b1e; color: #e8e8ff; font: 14px/1.45 system-ui, sans-serif; }
+  h1 { margin: 0 0 4px; font-size: 22px; } h1 small { font-size: 12px; font-weight: 500; color: #ffb84d; border: 1px solid #ffb84d; border-radius: 99px; padding: 2px 8px; margin-left: 8px; vertical-align: middle; }
+  .note { color: #9a9ac0; margin: 0 0 16px; max-width: 760px; }
+  .wrap { overflow: auto; border: 1px solid #2a2a55; border-radius: 12px; }
+  table { border-collapse: collapse; width: 100%; min-width: 1100px; }
+  th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid #1d1d40; white-space: nowrap; }
+  th { background: #151530; color: #9a9ac0; font-weight: 600; font-size: 12px; position: sticky; top: 0; }
+  tr.hit td { background: #2b2760; }
+  .chip { display: inline-block; padding: 2px 10px; border-radius: 99px; font-size: 12px; font-weight: 600; color: #0b0b1e; background: #9a9ac0; }
+  .Crítica { background: #ff5d73; } .Alta { background: #ffb84d; } .Media { background: #4da3ff; } .Baja { background: #2dd4a0; }
+  .mono { font-family: Consolas, monospace; font-size: 12px; color: #9a9ac0; user-select: all; }
+  .empty { padding: 24px; color: #9a9ac0; }
+</style>
+</head>
+<body>
+<h1>Mesa de ayuda <small>tablero de Monday SIMULADO (DEV)</small></h1>
+<p class="note">Esto es lo que vería la gerencia en Monday. No es Monday de verdad: es un tablero guardado en este navegador que NovaDesk llena y actualiza igual que lo haría la función real.
+  Se refresca solo. Copia el «Enlace del ítem» para probar «Vincular» en otro ticket.</p>
+<div class="wrap"><table id="t"></table></div>
+<script>
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const COLS = [['name', 'Ticket'], ['client', 'Cliente'], ['type', 'Tipo'], ['priority', 'Prioridad'], ['status', 'Estado'], ['assignee', 'Técnico'], ['created', 'Creado'], ['resolved', 'Resuelto'], ['updated', 'Actualizado']];
+  function draw() {
+    let db = null; try { db = JSON.parse(localStorage.getItem('novadesk.dev.db')); } catch {}
+    const items = (db && db.monday && db.monday.items) || [], hit = location.hash.slice(1), el = document.getElementById('t');
+    if (!items.length) { el.innerHTML = '<tr><td class="empty">Todavía no hay ítems. Abre NovaDesk (DEV) y crea uno desde un ticket con «Crear ítem en Monday».</td></tr>'; return; }
+    el.innerHTML = '<tr>' + COLS.map(c => `<th>${c[1]}</th>`).join('') + '<th>Enlace del ítem</th></tr>' + items.map(i =>
+      `<tr class="${i.id === hit ? 'hit' : ''}">` + COLS.map(([k]) => {
+        const v = k === 'updated' ? (i.updated ? new Date(i.updated).toLocaleString('es-CL') : '') : i[k];
+        return `<td>${k === 'priority' ? `<span class="chip ${esc(v)}">${esc(v)}</span>` : k === 'status' ? `<span class="chip">${esc(v)}</span>` : esc(v)}</td>`;
+      }).join('') + `<td class="mono">https://dev-simulado.monday.com/boards/777/pulses/${esc(i.id)}</td></tr>`).join('');
+  }
+  draw(); setInterval(draw, 1500); addEventListener('storage', draw); addEventListener('hashchange', draw);
+</script>
+</body>
+</html>

@@ -11,6 +11,11 @@
 <div class="stars" aria-hidden="true"></div>
 <div id="app"></div>
 <div id="toasts" aria-live="polite"></div>
+<script>
+/* DEV = esta página abierta desde localhost (tu carpeta del escritorio): corre contra una base SIMULADA en el navegador (dev/backend.js),
+   sin Supabase ni Monday de verdad. QA y Producción (páginas publicadas) no entran aquí y usan su Supabase (ver js/config.js). */
+if (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) document.write('<script src="dev/backend.js"><\/script>');
+</script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js" integrity="sha384-0w2KAL2YHP6wKOkUDzkCDGgVvfmHnj02DHeQ6XcHOgTfFsGyonKOpShMH1x6nk9o" crossorigin="anonymous"></script>
 <script src="js/config.js"></script>
 <script src="js/novadesk.js"></script>
