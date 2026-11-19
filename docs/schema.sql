@@ -178,8 +178,13 @@ where h.to_status is not null;
 create view bi.comentarios as
 select ticket_id, created_at from public.ticket_comments;
 
--- Usuario de solo lectura para Power BI (cambiar la clave por una larga y guardarla en un gestor de contraseñas).
-create role powerbi_reader login password 'CAMBIAR-POR-CLAVE-LARGA';
+-- Rol de solo lectura para Power BI. Se crea SIN acceso (nologin) y SIN contraseña a propósito: este archivo es público (está en el repositorio),
+-- así que aquí nunca debe escribirse una clave. Para habilitarlo cuando se vaya a usar Power BI, ejecuta POR SEPARADO (sin guardar la clave en ningún archivo):
+--   alter role powerbi_reader with login password '<clave larga y única, guardada en un gestor de contraseñas>';
+-- (Instalaciones antiguas de este archivo crearon el rol con una clave de relleno: ver «Por revisar» en docs/guia-del-codigo.md.)
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'powerbi_reader') then create role powerbi_reader nologin; end if;
+end $$;
 grant usage on schema bi to powerbi_reader;
 grant select on all tables in schema bi to powerbi_reader;
 -- Las vistas pertenecen al dueño y saltan el RLS: por eso powerbi_reader solo recibe permiso sobre bi.*,

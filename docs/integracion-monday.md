@@ -100,8 +100,10 @@ Limitaciones conocidas:
 - Si un ticket se reabre, Monday conserva la fecha de resolución anterior (la función no la borra).
 - Quitar el vínculo **no** borra el ítem en Monday.
 - Un ticket tiene como máximo un ítem de Monday.
-- La función no se ha probado contra una cuenta real de Monday todavía (se probó la pantalla con un servidor simulado); la primera
-  prueba real conviene hacerla en un tablero de ensayo.
+- Probado en QA contra un tablero de ensayo real de Monday (19-nov-2026): «Revisar conexión» con las 9 columnas en ✅, crear el ítem
+  desde un ticket y reflejar un cambio de prioridad. Falta repetirlo en Producción con el tablero definitivo.
+- Las plantillas de Monday suelen traer columnas con nombre o tipo cambiados (p. ej. «Estado» de personas, «Enlace» de texto):
+  revisa los tipos con «Revisar conexión» antes de armar `MONDAY_COLUMNS`. Cambiar el tipo de una columna en Monday crea otra con ID nuevo.
 
 ## Probar y deshacer
 
