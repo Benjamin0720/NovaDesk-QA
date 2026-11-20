@@ -5,8 +5,8 @@
 | | **DEV** | **QA** | **PRODUCCIÓN** |
 |---|---|---|---|
 | Qué es | Tu carpeta del escritorio | Página de pruebas publicada | La página real |
-| Dónde | `C:\Users\benja\Desktop\NovaDesk` → http://localhost:8123 | https://benjamin0720.github.io/NovaDesk-QA/ | https://benjamin0720.github.io/NovaDesk/ |
-| Repositorio de GitHub | (el de Producción, trabajando local) | `NovaDesk-QA` — remoto `qa` | `NovaDesk` — remoto `origin` |
+| Dónde | `C:\Users\benja\Desktop\NovaDesk` → http://localhost:8123 | https://benjamin0720.github.io/NovaDesk-QA/ | https://benjamin0720.github.io/NovaDesk-Prod/ |
+| Repositorio de GitHub | (el de Producción, trabajando local) | `NovaDesk-QA` — remoto `qa` | `NovaDesk-Prod` — remoto `origin` |
 | Base de datos | **ninguna**: base simulada en el navegador (`dev/backend.js`) | **Supabase de QA** (proyecto aparte) | Supabase de Producción |
 | Monday | simulado (`dev/monday.html`) | tablero de **ensayo** | tablero definitivo |
 | Datos | de ejemplo, solo en tu navegador | de prueba | reales |
@@ -35,7 +35,7 @@ Con las Edge Functions igual: se despliegan en QA, se prueban y luego en Producc
 ## Cómo sabe cada página a qué base conectarse
 
 El código es el mismo en los tres entornos. [js/config.js](../js/config.js) elige la configuración según la dirección donde está publicado:
-`localhost` → DEV (base simulada; su URL es falsa a propósito, así DEV jamás puede tocar un Supabase real), `…/NovaDesk-QA/` → QA, `…/NovaDesk/` → Producción.
+`localhost` → DEV (base simulada; su URL es falsa a propósito, así DEV jamás puede tocar un Supabase real), `…/NovaDesk-QA/` → QA, `…/NovaDesk-Prod/` → Producción (el repositorio de Producción se llamaba `NovaDesk` hasta el 20-nov-2026; `js/config.js` aún acepta ese nombre antiguo y se puede quitar cuando ya no se use).
 Una dirección que no esté en esa lista **no recibe ninguna configuración** (se desconecta): una copia o un fork nunca toca Producción.
 Fuera de Producción se ve siempre dónde estás: `[DEV]`/`[QA]` en el título y, en QA, una franja «🧪 QA · datos de prueba».
 Las claves *publishable* son públicas por diseño; la clave *secret*/service_role **nunca** va en el código.

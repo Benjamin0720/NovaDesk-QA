@@ -302,7 +302,7 @@ Resumen (el detalle y el paso a paso están en [entornos.md](entornos.md)):
 
 | | DEV | QA | Producción |
 |---|---|---|---|
-| Dónde | tu carpeta, `http://localhost:8123` | página `…/NovaDesk-QA/` | página `…/NovaDesk/` |
+| Dónde | tu carpeta, `http://localhost:8123` | página `…/NovaDesk-QA/` | página `…/NovaDesk-Prod/` |
 | Base de datos | **simulada** en el navegador (`dev/backend.js`) | Supabase de QA | Supabase de Producción |
 | Monday | simulado | tablero de **ensayo** | tablero definitivo |
 

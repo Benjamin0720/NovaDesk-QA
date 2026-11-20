@@ -96,7 +96,7 @@ Si crees que los necesitas, mejor primero preguntar.
 ## 6. Ramas y remotos (lo mínimo que hay que saber)
 
 - Este proyecto trabaja **solo en la rama `main`**. El script de publicación se niega a publicar otra rama.
-- Hay dos **remotos** (copias en GitHub): `origin` es **Producción** (repositorio `NovaDesk`) y `qa` es **QA** (repositorio `NovaDesk-QA`). Los ves con `git remote -v`.
+- Hay dos **remotos** (copias en GitHub): `origin` es **Producción** (repositorio `NovaDesk-Prod`) y `qa` es **QA** (repositorio `NovaDesk-QA`). Los ves con `git remote -v`.
 - `HEAD` es «el commit en el que estás parado ahora». Cada commit tiene un código (*hash*) de 40 letras y números; basta con los primeros 7.
 
 ---

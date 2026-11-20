@@ -4,7 +4,7 @@
    El MISMO código corre en los tres entornos; cada uno se reconoce por la dirección en la que está publicado:
      · DEV         → localhost (tu carpeta del escritorio). Usa una base SIMULADA en el navegador (dev/backend.js): no toca ningún Supabase.
      · QA          → https://benjamin0720.github.io/NovaDesk-QA/   → Supabase de QA
-     · PRODUCCIÓN  → https://benjamin0720.github.io/NovaDesk-Prod/ → Supabase de Producción (hasta el renombre del repositorio, …/NovaDesk/)
+     · PRODUCCIÓN  → https://benjamin0720.github.io/NovaDesk-Prod/ → Supabase de Producción
    Una dirección que no esté en la lista NO recibe configuración (no se conecta a nada): así una copia o un fork jamás toca Producción.
    Flujo obligatorio: DEV → QA → PRODUCCIÓN (ver docs/entornos.md y scripts/flujo.ps1). */
 (() => {

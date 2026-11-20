@@ -14,7 +14,7 @@ Mesa de ayuda con Requerimientos (R), Incidentes (I) y Control de cambios (C).
     `dev/backend.js`, que simula Auth, tablas, archivos y las Edge Functions (`admin-users`, `monday-sync`) con datos de ejemplo guardados en el navegador
     (panel «🧪 DEV» abajo a la izquierda; Monday simulado en `dev/monday.html`). No gasta cuota de nadie y no replica los permisos de la base (RLS).
   - **QA** es una página publicada aparte (repositorio `NovaDesk-QA`) conectada a **su propio Supabase**: aquí se prueba con una base real (permisos, funciones, Monday con tablero de ensayo).
-  - **Producción** es el repositorio `NovaDesk` (GitHub Pages) con el Supabase real.
+  - **Producción** es el repositorio `NovaDesk-Prod` (GitHub Pages: https://benjamin0720.github.io/NovaDesk-Prod/) con el Supabase real.
   - Se pasa de uno al siguiente con `.\scripts\flujo.cmd qa` y `.\scripts\flujo.cmd produccion`; un candado de git impide publicar en Producción algo que no esté ya en QA.
     El mismo código corre en los tres: `js/config.js` elige la configuración según la dirección donde está publicado.
 - **Monday:** cada ticket se puede vincular a un ítem de Monday (pegando su enlace o creándolo desde NovaDesk en un tablero único «Mesa de ayuda»), en un solo sentido
