@@ -4,7 +4,7 @@
    El MISMO código corre en los tres entornos; cada uno se reconoce por la dirección en la que está publicado:
      · DEV         → localhost (tu carpeta del escritorio). Usa una base SIMULADA en el navegador (dev/backend.js): no toca ningún Supabase.
      · QA          → https://benjamin0720.github.io/NovaDesk-QA/   → Supabase de QA
-     · PRODUCCIÓN  → https://benjamin0720.github.io/NovaDesk/      → Supabase de Producción
+     · PRODUCCIÓN  → https://benjamin0720.github.io/NovaDesk-Prod/ → Supabase de Producción (hasta el renombre del repositorio, …/NovaDesk/)
    Una dirección que no esté en la lista NO recibe configuración (no se conecta a nada): así una copia o un fork jamás toca Producción.
    Flujo obligatorio: DEV → QA → PRODUCCIÓN (ver docs/entornos.md y scripts/flujo.ps1). */
 (() => {
@@ -15,7 +15,8 @@
     produccion: { nombre: 'Producción', url: 'https://mrlqgnqrqikwpeuzpmob.supabase.co', key: 'sb_publishable_x4uV7VV-RnANJP8B4dYTiQ_fj6N3_Zs' },
   };
   const SITIOS = [   // dónde está publicado cada entorno: dominio + carpeta (en GitHub Pages es el nombre del repositorio)
-    { host: 'benjamin0720.github.io', carpeta: 'novadesk', entorno: 'produccion' },
+    { host: 'benjamin0720.github.io', carpeta: 'novadesk-prod', entorno: 'produccion' },
+    { host: 'benjamin0720.github.io', carpeta: 'novadesk', entorno: 'produccion' },   // nombre anterior del repositorio de Producción: quitar cuando ya no se use
     { host: 'benjamin0720.github.io', carpeta: 'novadesk-qa', entorno: 'qa' },
   ];
   /* Devuelve 'dev' | 'qa' | 'produccion' | null (null = dirección desconocida: sin configuración). */
