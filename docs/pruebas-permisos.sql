@@ -1,4 +1,5 @@
--- NovaDesk · pruebas de los permisos de docs/migracion-03-permisos.sql, docs/migracion-04-adjuntos.sql y docs/migracion-05-monday.sql (aplicar las tres antes).
+-- NovaDesk · pruebas de los permisos de docs/migracion-03-permisos.sql, docs/migracion-04-adjuntos.sql, docs/migracion-05-monday.sql
+-- y docs/migracion-06-contactos.sql (aplicar las cuatro antes).
 --
 -- SON SEGURAS: crean usuarios y tickets de mentira dentro de una transacción que termina con un error a propósito, así que
 -- no queda nada guardado. El informe aparece en ese mensaje de error («RESULTADO»): cada línea es ✔ (salió lo esperado) o
@@ -42,6 +43,7 @@ declare
   tec1 uuid := '00000000-0000-0000-0000-00000000a003';
   tec2 uuid := '00000000-0000-0000-0000-00000000a004';
   ina  uuid := '00000000-0000-0000-0000-00000000a005';
+  c2   uuid;   -- un segundo cliente (de mentira) para probar que una persona no sirve en tickets de otro cliente
   s text; bad int;
 begin
   -- Usuarios de prueba (el disparador de auth.users les crea el perfil como técnico inactivo; aquí se les da su rol).
@@ -255,6 +257,39 @@ begin
   perform pg_temp.attempt('nadie edita un vínculo (ni el administrador)',            adm,  $q$update public.ticket_links set sync_error = 'x' where id = '00000000-0000-0000-0000-0000000000e1'$q$, false);
   perform pg_temp.attempt('técnico NO quita un vínculo',                             tec1, $q$delete from public.ticket_links where id = '00000000-0000-0000-0000-0000000000e1'$q$, false);
   perform pg_temp.attempt('analista quita un vínculo',                               ana,  $q$delete from public.ticket_links where id = '00000000-0000-0000-0000-0000000000e1'$q$, true);
+
+  -- ───── Personas de los clientes (docs/migracion-06-contactos.sql) ─────
+  insert into public.clients (name, code) values ('ZZ Cliente de prueba', 'ZZPR') returning id into c2;
+  insert into public.client_contacts (id, client_id, name, position, email) values
+    ('00000000-0000-0000-0000-0000000000c1', c,  'Persona Prueba 1',          'Jefatura',  'p1@prueba.example'),
+    ('00000000-0000-0000-0000-0000000000c2', c,  'Persona Prueba 2',          null,        null),
+    ('00000000-0000-0000-0000-0000000000c3', c2, 'Persona de otro cliente',   null,        null);
+  insert into public.tickets (id, type, title, description, client_id, requester, priority, status, category, assignee_id, created_by) values
+    ('ZT-12', 'I', 'Ticket con persona', '', c, 'Persona Prueba 1', 3, 'Asignado', 'General', tec1, ana);
+  update public.tickets set contact_id = '00000000-0000-0000-0000-0000000000c1' where id = 'ZT-12';   -- como el SQL Editor (sin usuario de la app)
+
+  perform pg_temp.verify('las personas de los clientes tienen RLS activa',           (select relrowsecurity from pg_class where oid = 'public.client_contacts'::regclass));
+  perform pg_temp.attempt('técnico ve las personas de los clientes',                 tec1, $q$select 1 from public.client_contacts$q$, true);
+  perform pg_temp.attempt('usuario inactivo NO ve las personas',                     ina,  $q$select 1 from public.client_contacts$q$, false);
+  perform pg_temp.attempt('técnico NO agrega personas',                              tec1, format($q$insert into public.client_contacts (client_id, name) values (%L, 'Intruso')$q$, c), false);
+  perform pg_temp.attempt('técnico NO edita personas',                               tec1, $q$update public.client_contacts set name = 'Otro nombre' where id = '00000000-0000-0000-0000-0000000000c1'$q$, false);
+  perform pg_temp.attempt('analista agrega una persona',                             ana,  format($q$insert into public.client_contacts (client_id, name, position, email, phone) values (%L, 'Persona nueva', 'Compras', 'nueva@prueba.example', '123')$q$, c), true);
+  perform pg_temp.attempt('administrador agrega una persona',                        adm,  format($q$insert into public.client_contacts (client_id, name) values (%L, 'Otra persona')$q$, c), true);
+  perform pg_temp.attempt('analista edita y desactiva una persona',                  ana,  $q$update public.client_contacts set name = 'Persona Prueba 2 (editada)', active = false where id = '00000000-0000-0000-0000-0000000000c2'$q$, true);
+  perform pg_temp.attempt('NO se acepta una persona sin nombre',                     ana,  format($q$insert into public.client_contacts (client_id, name) values (%L, '   ')$q$, c), false);
+  perform pg_temp.attempt('nadie borra personas (ni el analista)',                   ana,  $q$delete from public.client_contacts where id = '00000000-0000-0000-0000-0000000000c2'$q$, false);
+  perform pg_temp.attempt('nadie borra personas (ni el administrador)',              adm,  $q$delete from public.client_contacts where id = '00000000-0000-0000-0000-0000000000c2'$q$, false);
+  perform pg_temp.attempt('técnico crea un ticket con una persona de su cliente',    tec1, format($q$insert into public.tickets (id, type, title, client_id, requester, contact_id, priority, status, category, assignee_id, created_by)
+    values ('ZT-13', 'I', 'Con persona', %L, 'Persona Prueba 1', '00000000-0000-0000-0000-0000000000c1', 3, 'Asignado', 'General', %L, %L)$q$, c, tec1, tec1), true);
+  perform pg_temp.attempt('NO se crea un ticket con una persona de OTRO cliente',    tec1, format($q$insert into public.tickets (id, type, title, client_id, requester, contact_id, priority, status, category, assignee_id, created_by)
+    values ('ZT-14', 'I', 'Persona equivocada', %L, 'Alguien', '00000000-0000-0000-0000-0000000000c3', 3, 'Asignado', 'General', %L, %L)$q$, c, tec1, tec1), false);
+  perform pg_temp.attempt('guardado completo con la persona sin cambios (como lo envía la app)', tec1,
+    $q$update public.tickets set requester = requester, contact_id = contact_id, updated_at = now() where id = 'ZT-12'$q$, true);
+  perform pg_temp.attempt('técnico NO cambia la persona de un ticket',               tec1, $q$update public.tickets set contact_id = '00000000-0000-0000-0000-0000000000c2' where id = 'ZT-12'$q$, false);
+  perform pg_temp.attempt('técnico NO quita la persona de un ticket',                tec1, $q$update public.tickets set contact_id = null where id = 'ZT-12'$q$, false);
+  perform pg_temp.attempt('analista cambia la persona de un ticket',                 ana,  $q$update public.tickets set contact_id = '00000000-0000-0000-0000-0000000000c2', requester = 'Persona Prueba 2 (editada)' where id = 'ZT-12'$q$, true);
+  perform pg_temp.attempt('analista NO asigna una persona de otro cliente',          ana,  $q$update public.tickets set contact_id = '00000000-0000-0000-0000-0000000000c3' where id = 'ZT-12'$q$, false);
+  perform pg_temp.verify('la persona del ticket quedó donde la dejó el analista',    (select contact_id = '00000000-0000-0000-0000-0000000000c2' from public.tickets where id = 'ZT-12'));
 
   select string_agg((case when ok then '✔ ' else '✘ ' end) || lbl || '  [' || detail || ']', E'\n' order by id), count(*) filter (where not ok)
     into s, bad from pg_temp.res;

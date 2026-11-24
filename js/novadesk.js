@@ -31,14 +31,18 @@ const OPEN_NOT = ['Resuelto', 'Cerrado', 'Rechazado', 'Implementado'];
 const isOpen = t => !OPEN_NOT.includes(t.status);
 
 /* ───────────── Estado y persistencia ───────────── */
-let S = { users: [], clients: [], tickets: [], audit: [], session: null };
-const ui = { view: 'dashboard', f: { q: '', type: '', status: 'abiertos', client: '', prio: '', assignee: '' }, boardType: 'I', open: null, overlay: null, draft: null, booting: true, up: 0 };
+let S = { users: [], clients: [], contacts: [], tickets: [], audit: [], session: null };
+const ui = { view: 'dashboard', f: { q: '', type: '', status: 'abiertos', client: '', prio: '', assignee: '', contact: '', pq: '' }, boardType: 'I', open: null, overlay: null, draft: null, booting: true, up: 0, clientId: null, peopleAll: false };
 const uid = () => crypto.randomUUID();
 const me = () => S.users.find(u => u.id === S.session);
 const role = () => me()?.role;
 const staff = () => role() !== 'tecnico';
 const client = id => S.clients.find(c => c.id === id) || { name: '—', color: '#888', slaFactor: 1 };
 const user = id => S.users.find(u => u.id === id);
+/* Personas de cada cliente (docs/migracion-06-contactos.sql): quienes piden soporte. Un ticket apunta a una (contactId) y guarda además su nombre en `requester`. */
+const contact = id => (id ? S.contacts.find(p => p.id === id) : null);
+const contactsOf = (clientId, all) => S.contacts.filter(p => p.clientId === clientId && (all || p.active)).sort((a, b) => a.name.localeCompare(b.name, 'es'));
+const requesterOf = t => contact(t.contactId)?.name || t.requester || '—';
 /* A los tickets se les puede asignar cualquier usuario activo: el administrador actúa también como analista. */
 const assignable = () => S.users.filter(u => u.active);
 const uLabel = u => u.name + (u.role === 'tecnico' ? '' : ` (${ROLES[u.role].name})`);
@@ -56,20 +60,23 @@ const toMs = s => (s ? new Date(s).getTime() : null);
 
 const clientRow = c => ({ id: c.id, name: c.name, code: c.code, color: c.color, contact: c.contact || null, sla_factor: c.slaFactor, active: true });
 const fromClient = r => ({ id: r.id, name: r.name, code: r.code, color: r.color, contact: r.contact || '', slaFactor: Number(r.sla_factor) });
+const contactRow = p => ({ id: p.id, client_id: p.clientId, name: p.name, position: p.position || null, email: p.email || null, phone: p.phone || null, active: p.active });
+const fromContact = r => ({ id: r.id, clientId: r.client_id, name: r.name, position: r.position || '', email: r.email || '', phone: r.phone || '', active: r.active });
 const userRow = u => ({ id: u.id, username: u.username, name: u.name, role: u.role, active: u.active, skills: u.skills, must_change: !!u.mustChange });
 const fromUser = r => ({ id: r.id, username: r.username, name: r.name, role: r.role, active: r.active, skills: r.skills || [], mustChange: r.must_change, lastLogin: toMs(r.last_login) });
 const ticketRow = t => ({ id: t.id, type: t.type, title: t.title, description: t.desc, client_id: t.clientId, requester: t.requester, priority: t.priority, status: t.status,
   category: t.category, assignee_id: t.assigneeId || null, created_by: t.createdBy, ai_confidence: t.ai ?? null, created_at: toIso(t.createdAt), updated_at: toIso(t.updatedAt),
   resolved_at: toIso(t.resolvedAt), change_impact: t.change?.impact ?? null, change_complexity: t.change?.complexity ?? null, change_start: toIso(t.change?.start),
-  change_hours: t.change?.hours ?? null, change_rollback: t.change?.rollback ?? null });
+  change_hours: t.change?.hours ?? null, change_rollback: t.change?.rollback ?? null,
+  ...(contactsReady ? { contact_id: t.contactId || null } : {}) });   // contact_id solo se envía si la base ya tiene la migración 06 (si no, la columna no existe)
 function fromTicket(r) {
   const t = { id: r.id, type: r.type, title: r.title, desc: r.description, clientId: r.client_id, requester: r.requester, priority: r.priority, status: r.status, category: r.category,
-    assigneeId: r.assignee_id, createdBy: r.created_by, createdAt: toMs(r.created_at), updatedAt: toMs(r.updated_at), resolvedAt: toMs(r.resolved_at), ai: r.ai_confidence, comments: [], history: [], attachments: [], monday: null };
+    assigneeId: r.assignee_id, contactId: r.contact_id || null, createdBy: r.created_by, createdAt: toMs(r.created_at), updatedAt: toMs(r.updated_at), resolvedAt: toMs(r.resolved_at), ai: r.ai_confidence, comments: [], history: [], attachments: [], monday: null };
   if (r.type === 'C') t.change = { impact: r.change_impact || 2, complexity: r.change_complexity || 2, start: toMs(r.change_start), hours: r.change_hours == null ? 2 : Number(r.change_hours), rollback: r.change_rollback || '', approvals: [] };
   return t;
 }
 
-let snap = { clients: {}, users: {}, tickets: {} }, myRole = null, syncQ = Promise.resolve(), pending = 0, rev = 0;
+let snap = { clients: {}, users: {}, tickets: {}, contacts: {} }, myRole = null, syncQ = Promise.resolve(), pending = 0, rev = 0;
 const failed = e => { console.error(e); toast('No se pudo guardar en el servidor: ' + (e.message || e)); };
 async function fetchAll(table, order) {
   const out = [];
@@ -82,10 +89,10 @@ async function fetchAll(table, order) {
 }
 async function fetchData(isAdmin) {
   const audit = isAdmin ? sb.from('audit_log').select('*').order('created_at', { ascending: false }).limit(200).then(r => { if (r.error) throw r.error; return r.data.reverse(); }) : [];
-  const [cl, us, tk, cm, hs, ap, fa, lk, au] = await Promise.all([fetchAll('clients', ['name']), fetchAll('profiles', ['name']), fetchAll('tickets', ['created_at', 'id']),
+  const [cl, us, tk, cm, hs, ap, fa, lk, ct, au] = await Promise.all([fetchAll('clients', ['name']), fetchAll('profiles', ['name']), fetchAll('tickets', ['created_at', 'id']),
     fetchAll('ticket_comments', ['created_at', 'id']), fetchAll('ticket_history', ['created_at', 'id']), fetchAll('change_approvals', ['created_at', 'id']),
-    fetchAll('ticket_attachments', ['created_at', 'id']), fetchLinks(), audit]);
-  return { cl, us, tk, cm, hs, ap, fa, lk, au };
+    fetchAll('ticket_attachments', ['created_at', 'id']), fetchLinks(), fetchContacts(), audit]);
+  return { cl, us, tk, cm, hs, ap, fa, lk, ct, au };
 }
 /* Los vínculos con Monday (docs/migracion-05-monday.sql) son opcionales: si esa migración aún no se ejecutó en la base, la app
    funciona igual y simplemente no muestra la tarjeta de Monday. */
@@ -94,9 +101,16 @@ async function fetchLinks() {
   try { const r = await fetchAll('ticket_links', ['created_at', 'id']); linksReady = true; return r; }
   catch (e) { if (e.code === 'PGRST205' || e.code === '42P01') { linksReady = false; return []; } throw e; }
 }
+/* Igual con las personas de los clientes (docs/migracion-06-contactos.sql): si la base aún no tiene esa migración, la app funciona como antes
+   (el solicitante se escribe a mano) y no muestra las pantallas de personas. */
+let contactsReady = true;
+async function fetchContacts() {
+  try { const r = await fetchAll('client_contacts', ['name']); contactsReady = true; return r; }
+  catch (e) { if (e.code === 'PGRST205' || e.code === '42P01') { contactsReady = false; return []; } throw e; }
+}
 const fromLink = l => ({ id: l.id, url: l.url, boardId: l.board_id, itemId: l.item_id, by: l.linked_by, at: toMs(l.created_at), syncedAt: toMs(l.synced_at), error: l.sync_error || '' });
 function applyData(d) {
-  S.clients = d.cl.map(fromClient); S.users = d.us.map(fromUser); S.tickets = d.tk.map(fromTicket);
+  S.clients = d.cl.map(fromClient); S.users = d.us.map(fromUser); S.contacts = d.ct.map(fromContact); S.tickets = d.tk.map(fromTicket);
   const by = Object.fromEntries(S.tickets.map(t => [t.id, t]));
   d.cm.forEach(c => by[c.ticket_id]?.comments.push({ id: c.id, by: c.author_id, at: toMs(c.created_at), text: c.body, internal: c.internal }));
   d.hs.forEach(h => by[h.ticket_id]?.history.push({ at: toMs(h.created_at), by: h.actor_id, text: h.text }));
@@ -105,8 +119,9 @@ function applyData(d) {
   d.lk.forEach(l => { if (by[l.ticket_id]) by[l.ticket_id].monday = fromLink(l); });
   S.tickets.forEach(t => { if (t.monday) monSig[t.id] = mondaySig(t); });   // lo que se lee del servidor se da por ya sincronizado
   S.audit = d.au.map(a => ({ at: toMs(a.created_at), by: a.actor_id, text: a.text, sent: true }));
-  snap = { clients: {}, users: {}, tickets: {} };
+  snap = { clients: {}, users: {}, tickets: {}, contacts: {} };
   S.clients.forEach(c => { snap.clients[c.id] = JSON.stringify(clientRow(c)); });
+  S.contacts.forEach(p => { snap.contacts[p.id] = JSON.stringify(contactRow(p)); });
   S.users.forEach(u => { snap.users[u.id] = JSON.stringify(userRow(u)); });
   S.tickets.forEach(t => { snap.tickets[t.id] = { core: JSON.stringify(ticketRow(t)), cids: new Set(t.comments.map(c => c.id)), nh: t.history.length, na: t.change?.approvals.length || 0 }; });
 }
@@ -116,6 +131,10 @@ async function pushChanges() {
   if (myRole === 'admin') {
     for (const c of S.clients) { const row = clientRow(c), k = JSON.stringify(row); if (snap.clients[c.id] !== k) { await run(sb.from('clients').upsert(row)); snap.clients[c.id] = k; } }
     for (const u of S.users) { const row = userRow(u), k = JSON.stringify(row); if (snap.users[u.id] && snap.users[u.id] !== k) { await run(sb.from('profiles').update(row).eq('id', u.id)); snap.users[u.id] = k; } }
+  }
+  /* Las personas de los clientes las agregan y editan analista y administrador; se suben antes que los tickets (un ticket nuevo puede apuntar a una persona recién creada). */
+  if (contactsReady && (myRole === 'admin' || myRole === 'analista')) {
+    for (const p of S.contacts) { const row = contactRow(p), k = JSON.stringify(row); if (snap.contacts[p.id] !== k) { await run(sb.from('client_contacts').upsert(row)); snap.contacts[p.id] = k; } }
   }
   for (const t of S.tickets) {
     const row = ticketRow(t), k = JSON.stringify(row); let s = snap.tickets[t.id];
@@ -186,7 +205,7 @@ function touch() { lastActive = Date.now(); if (S.session) try { sessionStorage.
 function endSession(msg) {
   if (S.session) audit(msg || 'Cierre de sesión');
   save(); S.session = null; ui.open = null; ui.overlay = null; try { sessionStorage.removeItem(SESS_KEY); } catch {}
-  syncQ = syncQ.then(() => sb.auth.signOut()).catch(() => {}).then(() => { if (!S.session) { S.users = []; S.clients = []; S.tickets = []; S.audit = []; myRole = null; snap = { clients: {}, users: {}, tickets: {} }; mondayP = null; mondayOn = null; ui.mondayCheck = null; } });
+  syncQ = syncQ.then(() => sb.auth.signOut()).catch(() => {}).then(() => { if (!S.session) { S.users = []; S.clients = []; S.contacts = []; S.tickets = []; S.audit = []; myRole = null; snap = { clients: {}, users: {}, tickets: {}, contacts: {} }; mondayP = null; mondayOn = null; ui.mondayCheck = null; } });
 }
 setInterval(() => { if (S && S.session && Date.now() - lastActive > IDLE) { endSession('Sesión cerrada por inactividad'); ui.loginError = 'Tu sesión se cerró por inactividad. Ingresa nuevamente.'; render(); } }, 20000);
 const theme = () => localStorage.getItem(THEME_KEY) || 'dark';
@@ -626,7 +645,7 @@ function viewShell(inner) {
   const u = me(), vis = visible();
   const nav = NAV.filter(n => !n[3] || n[3] === role()).map(([k, i, l]) => {
     const cnt = k === 'tickets' ? vis.filter(isOpen).length : k === 'changes' ? vis.filter(t => t.type === 'C' && ['En evaluación', 'Aprobado', 'Programado'].includes(t.status)).length : '';
-    return `<a class="${ui.view === k ? 'on' : ''}" data-act="nav" data-v="${k}"><span>${i}</span>${l}${cnt ? `<span class="cnt">${cnt}</span>` : ''}</a>`;
+    return `<a class="${ui.view === k || (k === 'clients' && ui.view === 'client') ? 'on' : ''}" data-act="nav" data-v="${k}"><span>${i}</span>${l}${cnt ? `<span class="cnt">${cnt}</span>` : ''}</a>`;
   }).join('');
   return `<div class="shell"><aside class="side">
     <div class="brand">${logo()}<div><b>NovaDesk</b><small>mesa de ayuda</small></div></div>
@@ -694,7 +713,7 @@ function viewDashboard() {
 function filtered() {
   const f = ui.f, q = norm(f.q);
   return visible().filter(t => (!f.type || t.type === f.type) && (!f.client || t.clientId === f.client) && (!f.prio || String(t.priority) === f.prio)
-    && (!f.assignee || (f.assignee === 'none' ? !t.assigneeId : t.assigneeId === f.assignee))
+    && (!f.assignee || (f.assignee === 'none' ? !t.assigneeId : t.assigneeId === f.assignee)) && (!f.contact || t.contactId === f.contact)
     && (f.status === '' || (f.status === 'abiertos' ? isOpen(t) : t.status === f.status))
     && (!q || norm(t.id + ' ' + t.title + ' ' + t.desc + ' ' + t.requester).includes(q))).sort((a, b) => b.createdAt - a.createdAt);
 }
@@ -707,9 +726,10 @@ function viewTickets() {
     <select data-f="status">${opt('abiertos', 'Solo abiertos', f.status)}${opt('', 'Todos los estados', f.status)}${allSt.map(s => opt(s, s, f.status)).join('')}</select>
     <select data-f="client">${opt('', 'Todos los clientes', f.client)}${S.clients.map(c => opt(c.id, c.name, f.client)).join('')}</select>
     <select data-f="prio">${opt('', 'Toda prioridad', f.prio)}${Object.entries(PRIO).map(([k, v]) => opt(k, v, f.prio)).join('')}</select>
-    ${staff() ? `<select data-f="assignee">${opt('', 'Cualquier técnico', f.assignee)}${opt('none', 'Sin asignar', f.assignee)}${assignable().map(u => opt(u.id, uLabel(u), f.assignee)).join('')}</select>` : ''}</div>
+    ${staff() ? `<select data-f="assignee">${opt('', 'Cualquier técnico', f.assignee)}${opt('none', 'Sin asignar', f.assignee)}${assignable().map(u => opt(u.id, uLabel(u), f.assignee)).join('')}</select>` : ''}
+    ${f.contact ? `<span class="badge" style="padding:6px 12px">👤 ${esc(contact(f.contact)?.name || 'Persona')} <a class="lnk" data-act="clearContact" title="Quitar este filtro">✕</a></span>` : ''}</div>
   <div class="card" style="padding:6px 8px;overflow:auto">${list.length ? `<table><tr><th>ID</th><th>Asunto</th><th>Cliente</th><th>Prioridad</th><th>Estado</th><th>Asignado</th><th>SLA / Ventana</th></tr>
-    ${list.map(t => `<tr class="click" data-act="open" data-id="${t.id}"><td>${tid(t)}</td><td><b>${esc(t.title)}</b><div class="muted sm">${esc(t.category)} · ${rel(t.createdAt)}</div></td><td>${clientB(t.clientId)}</td><td>${prioB(t.priority)}</td><td><span class="badge">${t.status}</span></td><td>${t.assigneeId ? `<div class="row">${avatar(user(t.assigneeId))}<span class="sm">${esc(user(t.assigneeId).name.split(' ')[0])}</span></div>` : '<span class="muted sm">—</span>'}</td><td>${slaB(t)}</td></tr>`).join('')}</table>` : `<div class="empty">${role() === 'tecnico' ? 'No tienes tickets asignados con estos filtros.' : 'Sin resultados.'}</div>`}</div>`);
+    ${list.map(t => `<tr class="click" data-act="open" data-id="${t.id}"><td>${tid(t)}</td><td><b>${esc(t.title)}</b><div class="muted sm">${esc(t.category)} · ${rel(t.createdAt)}</div></td><td>${clientB(t.clientId)}<div class="muted sm" style="margin-top:3px">👤 ${esc(requesterOf(t))}</div></td><td>${prioB(t.priority)}</td><td><span class="badge">${t.status}</span></td><td>${t.assigneeId ? `<div class="row">${avatar(user(t.assigneeId))}<span class="sm">${esc(user(t.assigneeId).name.split(' ')[0])}</span></div>` : '<span class="muted sm">—</span>'}</td><td>${slaB(t)}</td></tr>`).join('')}</table>` : `<div class="empty">${role() === 'tecnico' ? 'No tienes tickets asignados con estos filtros.' : 'Sin resultados.'}</div>`}</div>`);
 }
 
 function viewBoard() {
@@ -737,12 +757,33 @@ function viewChanges() {
 function viewClients() {
   return viewShell(`<div class="row between wrap" style="margin-bottom:14px"><h1>Clientes</h1>${role() === 'admin' ? '<button class="btn pri" data-act="clientForm">＋ Nuevo cliente</button>' : ''}</div>
   <div class="grid g4" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">${S.clients.map(c => {
-    const all = S.tickets.filter(t => t.clientId === c.id), op = all.filter(isOpen);
+    const all = S.tickets.filter(t => t.clientId === c.id), op = all.filter(isOpen), np = S.contacts.filter(p => p.clientId === c.id && p.active).length;
     return `<div class="card" style="border-top:3px solid ${c.color}"><div class="row between"><h2 style="color:${c.color}">${esc(c.name)}</h2><span class="badge">${esc(c.code)}</span></div>
-    <p class="muted sm">${esc(c.contact || 'Sin contacto')}</p>
+    <p class="muted sm">${esc(c.contact || 'Sin contacto')}${contactsReady ? ` · 👥 ${np} persona${np === 1 ? '' : 's'}` : ''}</p>
     <div class="row wrap"><span class="badge">🔥 ${op.filter(t => t.type === 'I').length} inc.</span><span class="badge">📨 ${op.filter(t => t.type === 'R').length} req.</span><span class="badge">🔀 ${op.filter(t => t.type === 'C').length} cambios</span></div>
     <p class="sm muted">Factor SLA: <b>×${c.slaFactor}</b> ${c.slaFactor < 1 ? '(más exigente)' : ''} · ${all.length} tickets históricos</p>
-    <div class="row"><button class="btn sm grow" data-act="clientTickets" data-id="${c.id}">Ver tickets</button>${role() === 'admin' ? `<button class="btn sm" data-act="clientForm" data-id="${c.id}">Editar</button>` : ''}</div></div>`; }).join('')}</div>`);
+    <div class="row wrap"><button class="btn sm grow" data-act="clientTickets" data-id="${c.id}">Ver tickets</button>${contactsReady ? `<button class="btn sm grow" data-act="clientPeople" data-id="${c.id}">👥 Personas</button>` : ''}${role() === 'admin' ? `<button class="btn sm" data-act="clientForm" data-id="${c.id}">Editar</button>` : ''}</div></div>`; }).join('')}</div>`);
+}
+/* Detalle de un cliente: las personas que piden soporte (a quienes se asignan los tickets como solicitante). */
+function viewClient() {
+  const c = S.clients.find(x => x.id === ui.clientId); if (!c) return viewClients();
+  const mgr = staff(), q = norm(ui.f.pq || ''), mine = S.contacts.filter(p => p.clientId === c.id), nAct = mine.filter(p => p.active).length;
+  const list = mine.filter(p => (ui.peopleAll || p.active) && (!q || norm([p.name, p.position, p.email, p.phone].join(' ')).includes(q))).sort((a, b) => a.name.localeCompare(b.name, 'es'));
+  const rows = list.map(p => {
+    const tk = S.tickets.filter(t => t.contactId === p.id), op = tk.filter(isOpen).length;
+    return `<tr style="${p.active ? '' : 'opacity:.55'}"><td><div class="row">${avatar(p)}<div><b>${esc(p.name)}</b>${p.active ? '' : ' <span class="badge">Inactiva</span>'}<div class="muted sm">${esc(p.position || '—')}</div></div></div></td>
+      <td>${p.email ? `<a href="mailto:${esc(p.email)}">${esc(p.email)}</a>` : '<span class="muted">—</span>'}</td><td>${esc(p.phone || '—')}</td>
+      <td>${tk.length ? `<a class="lnk" data-act="personTickets" data-id="${p.id}">${op} abierto${op === 1 ? '' : 's'}</a> <span class="muted sm">/ ${tk.length} en total</span>` : '<span class="muted sm">sin tickets</span>'}</td>
+      <td>${mgr ? `<div class="row"><button class="btn sm" data-act="personForm" data-id="${p.id}">Editar</button><button class="btn sm" data-act="togglePerson" data-id="${p.id}">${p.active ? 'Desactivar' : 'Activar'}</button></div>` : ''}</td></tr>`;
+  }).join('');
+  return viewShell(`<div class="row between wrap" style="margin-bottom:6px"><div class="row wrap"><button class="btn sm" data-act="nav" data-v="clients">← Clientes</button><h1 style="color:${c.color}">${esc(c.name)}</h1><span class="badge">${esc(c.code)}</span></div>
+    <div class="row">${mgr && contactsReady ? `<button class="btn pri" data-act="personForm" data-client="${c.id}">＋ Nueva persona</button>` : ''}</div></div>
+  <p class="muted sm" style="margin:0 0 14px">Las personas de ${esc(c.name)} se eligen como solicitante al crear un ticket y se pueden cambiar desde el ticket.${mgr ? ' Una persona desactivada deja de ofrecerse, pero sus tickets la conservan.' : ' Solo un analista o el administrador puede agregarlas o editarlas.'}</p>
+  ${contactsReady ? `<div class="card" style="padding:12px 14px;overflow:auto"><div class="filters" style="margin-bottom:8px"><input data-f="pq" placeholder="Buscar persona…" value="${esc(ui.f.pq || '')}" style="min-width:220px">
+    <div class="tabs"><span class="tab ${!ui.peopleAll ? 'on' : ''}" data-act="peopleFilter" data-v="">Activas (${nAct})</span><span class="tab ${ui.peopleAll ? 'on' : ''}" data-act="peopleFilter" data-v="all">Todas (${mine.length})</span></div></div>
+    ${list.length ? `<table><tr><th>Persona</th><th>Correo</th><th>Teléfono / anexo</th><th>Tickets</th><th></th></tr>${rows}</table>`
+      : `<div class="empty">${mine.length ? 'Sin resultados.' : `Este cliente aún no tiene personas registradas.${mgr ? '<br>Usa «＋ Nueva persona» para agregar a quienes piden soporte y asignarles sus tickets.' : ''}`}</div>`}</div>`
+    : '<div class="alert">Las personas de los clientes aún no están disponibles en esta base de datos (falta ejecutar <span class="mono">docs/migracion-06-contactos.sql</span>).</div>'}`);
 }
 function viewUsers() {
   return viewShell(`<div class="row between wrap" style="margin-bottom:14px"><h1>Usuarios y roles</h1><button class="btn pri" data-act="newUser">＋ Nuevo usuario</button></div>
@@ -753,7 +794,7 @@ function viewUsers() {
   <div class="card" style="margin-top:16px"><h3>🛡️ Registro de seguridad (últimos 15 eventos)</h3>${S.audit.slice(-15).reverse().map(a => `<div class="row sm" style="padding:4px 0"><span class="muted" style="width:110px">${fdate(a.at)}</span><b style="width:150px">${esc(user(a.by)?.name || 'Anónimo')}</b><span>${esc(a.text)}</span></div>`).join('') || '<div class="muted">Sin eventos</div>'}</div>
   ${viewMondayAdmin()}
   <div class="card" style="margin-top:16px"><h3>Matriz de permisos</h3><table><tr><th>Acción</th><th>👑 Admin</th><th>🧭 Analista</th><th>🛠️ Técnico</th></tr>
-  ${[['Ver todos los tickets', 1, 1, 0], ['Ver tickets asignados / propios', 1, 1, 1], ['Crear tickets', 1, 1, 1], ['Adjuntar archivos y ver los de sus tickets', 1, 1, 1], ['Eliminar archivos de otras personas', 1, 1, 0], ['Vincular tickets con Monday', 1, 1, 0], ['Clasificar y asignar con Nova', 1, 1, 0], ['Cambiar prioridad / categoría', 1, 1, 0], ['Trabajar y resolver tickets', 1, 1, 1], ['Aprobar / rechazar cambios (CAB)', 1, 1, 0], ['Ejecutar cambios aprobados', 1, 1, 1], ['Gestionar clientes y usuarios', 1, 0, 0], ['Restablecer contraseñas', 1, 0, 0]].map(r => `<tr><td>${r[0]}</td>${r.slice(1).map(x => `<td>${x ? '✅' : '—'}</td>`).join('')}</tr>`).join('')}</table></div>`);
+  ${[['Ver todos los tickets', 1, 1, 0], ['Ver tickets asignados / propios', 1, 1, 1], ['Crear tickets', 1, 1, 1], ['Adjuntar archivos y ver los de sus tickets', 1, 1, 1], ['Eliminar archivos de otras personas', 1, 1, 0], ['Vincular tickets con Monday', 1, 1, 0], ['Clasificar y asignar con Nova', 1, 1, 0], ['Cambiar prioridad / categoría', 1, 1, 0], ['Trabajar y resolver tickets', 1, 1, 1], ['Aprobar / rechazar cambios (CAB)', 1, 1, 0], ['Ejecutar cambios aprobados', 1, 1, 1], ['Agregar y editar las personas de cada cliente', 1, 1, 0], ['Gestionar clientes y usuarios', 1, 0, 0], ['Restablecer contraseñas', 1, 0, 0]].map(r => `<tr><td>${r[0]}</td>${r.slice(1).map(x => `<td>${x ? '✅' : '—'}</td>`).join('')}</tr>`).join('')}</table></div>`);
 }
 
 function novaPanel(a, cur) {
@@ -768,6 +809,17 @@ function novaPanel(a, cur) {
   ${cur ? `<div class="row wrap" style="margin-top:10px"><button class="btn sm" data-act="applyAI" data-id="${cur.id}">Aplicar categoría y prioridad</button>${!cur.assigneeId && a.assignee && cur.type !== 'C' ? `<button class="btn sm" data-act="assignAI" data-id="${cur.id}">Asignar a ${esc(a.assignee.name.split(' ')[0])}</button>` : ''}</div>` : ''}</div>`;
 }
 
+/* Campo «Solicitante» del ticket nuevo: las personas registradas del cliente elegido, o un nombre escrito a mano
+   (también si el cliente aún no tiene personas, o la base aún no tiene la migración 06). */
+function requesterField(d) {
+  const cid = d.clientId || S.clients[0]?.id, people = contactsReady ? contactsOf(cid) : [];
+  const free = `<input name="requester" value="${esc(d.requester || '')}" placeholder="Nombre / área">`;
+  if (!people.length) return `<div><label>Solicitante</label>${free}${contactsReady && cid ? `<div class="muted sm" style="margin-top:4px">Este cliente aún no tiene personas registradas${staff() ? ': agrégalas en <a class="lnk" data-act="clientPeople" data-id="${cid}">Clientes → Personas</a>' : ''}.</div>` : ''}</div>`;
+  const sel = people.some(p => p.id === d.contactId) || d.contactId === OTHER ? d.contactId : '';
+  return `<div><label>Solicitante</label><select name="contactId">${opt('', '— Elegir persona —', sel)}${people.map(p => opt(p.id, p.name + (p.position ? ' · ' + p.position : ''), sel)).join('')}${opt(OTHER, '✎ Otra persona (escribir nombre)', sel)}</select>
+    ${sel === OTHER ? `<div style="margin-top:6px">${free}</div>` : ''}</div>`;
+}
+const OTHER = '_otro';
 function viewNew() {
   const d = ui.draft || {}, t = d.type || '';
   const a = (d.title || d.desc) ? classify((d.title || '') + ' ' + (d.desc || ''), d.clientId || S.clients[0].id, { type: d.type }) : null;
@@ -779,7 +831,7 @@ function viewNew() {
     <div><label>Asunto</label><input name="title" required placeholder="Ej: Impresora de farmacia no imprime" value="${esc(d.title || '')}"></div>
     <div><label>Descripción (mientras más detalle, mejor clasifica Nova)</label><textarea name="desc" placeholder="Describe qué pasa, a quiénes afecta y desde cuándo…">${esc(d.desc || '')}</textarea></div>
     <div class="grid" style="grid-template-columns:1fr 1fr 1fr;gap:10px">
-      <div><label>Solicitante</label><input name="requester" value="${esc(d.requester || '')}" placeholder="Nombre / área"></div>
+      ${requesterField(d)}
       <div><label>Prioridad</label><select name="priority">${opt('', '✦ Automática', d.priority)}${Object.entries(PRIO).map(([k, v]) => opt(k, v, d.priority)).join('')}</select></div>
       <div><label>Categoría</label><select name="category">${opt('', '✦ Automática', d.category)}${CATS.map(c => opt(c, c, d.category)).join('')}</select></div></div>
     ${t === 'C' ? `<div class="card" style="background:var(--bg2)"><h3>Datos del cambio</h3><div class="grid" style="grid-template-columns:1fr 1fr 1fr;gap:10px">
@@ -795,6 +847,14 @@ function viewNew() {
   <div>${a ? novaPanel(a) : '<div class="ai"><h3><span class="spark">✦</span> Nova IA</h3><p class="muted">Empieza a escribir el asunto y la descripción: clasificaré el tipo, la categoría, la prioridad y sugeriré técnico y primeras acciones en tiempo real.</p></div>'}</div></div>`);
 }
 
+/* «Solicitante» en el detalle del ticket: nombre y datos de contacto de la persona; analista y administrador pueden elegir otra persona del mismo cliente. */
+function requesterCell(t, ed) {
+  const p = contact(t.contactId), others = contactsOf(t.clientId).filter(x => x.id !== t.contactId);
+  const info = p && (p.position || p.email || p.phone) ? `<div class="muted sm">${[p.position, p.email, p.phone].filter(Boolean).map(esc).join(' · ')}</div>` : '';
+  if (ed && contactsReady && (p || others.length))
+    return `<div><select data-edit="contactId">${p ? opt(p.id, p.name + (p.active ? '' : ' (inactiva)'), t.contactId) : opt('', '✎ ' + (t.requester || '—') + ' (sin registrar)', '')}${others.map(x => opt(x.id, x.name + (x.position ? ' · ' + x.position : ''), t.contactId)).join('')}</select>${info}</div>`;
+  return `<div>${esc(p?.name || t.requester || '—')}${info}</div>`;
+}
 function viewDrawer(t) {
   const flow = flowOf(t), idx = flow.indexOf(t.status), a = classify(t.title + ' ' + t.desc, t.clientId, { excludeId: t.id, type: t.type });
   const s = slaInfo(t), conf = changeConflicts(t), r = risk(t.change);
@@ -823,7 +883,7 @@ function viewDrawer(t) {
       <div class="row between" style="margin-top:8px"><label class="row" style="margin:0"><input type="checkbox" id="cmInt" style="width:auto"> 🔒 Nota interna</label><button class="btn pri sm" data-act="comment" data-id="${t.id}">Comentar</button></div></div>
   </div><div class="col">
     <div class="card"><h3>Detalles</h3><div class="kv">
-      <span>Cliente</span><b>${esc(client(t.clientId).name)}</b><span>Solicitante</span><span>${esc(t.requester || '—')}</span>
+      <span>Cliente</span><b>${esc(client(t.clientId).name)}</b><span>Solicitante</span>${requesterCell(t, ed)}
       <span>Prioridad</span>${ed ? `<select data-edit="priority">${Object.entries(PRIO).map(([k, v]) => opt(k, v, t.priority)).join('')}</select>` : prioB(t.priority)}
       <span>Categoría</span>${ed ? `<select data-edit="category">${CATS.map(c => opt(c, c, t.category)).join('')}</select>` : esc(t.category)}
       <span>Asignado</span>${ed ? `<select data-edit="assigneeId">${opt('', '— Sin asignar —', t.assigneeId || '')}${assignable().map(u => opt(u.id, uLabel(u), t.assigneeId)).join('')}</select>` : `<div class="row">${avatar(user(t.assigneeId))} ${esc(user(t.assigneeId)?.name || '—')}</div>`}
@@ -836,6 +896,15 @@ function viewOverlay() {
   const o = ui.overlay; if (!o) return '';
   if (o.kind === 'palette') return `<div class="overlay center" data-act="closeOv"><div class="palette"><input id="pal" placeholder="Pregunta o busca: “incidentes críticos de bupa”, “mis tickets”, “cambios”…" autocomplete="off"><div class="res" id="palRes"></div></div></div>`;
   if (o.kind === 'client') { const c = S.clients.find(x => x.id === o.id) || { name: '', code: '', color: '#8b7bff', contact: '', slaFactor: 1 }; return modal(o.id ? 'Editar cliente' : 'Nuevo cliente', `<div><label>Nombre</label><input name="name" required value="${esc(c.name)}"></div><div class="grid" style="grid-template-columns:1fr 1fr 1fr;gap:10px"><div><label>Código</label><input name="code" value="${esc(c.code)}"></div><div><label>Color</label><input type="color" name="color" value="${c.color}"></div><div><label>Factor SLA</label><input type="number" name="slaFactor" step="0.05" min="0.25" max="3" value="${c.slaFactor}"></div></div><div><label>Contacto</label><input name="contact" value="${esc(c.contact)}"></div>`, 'saveClient'); }
+  if (o.kind === 'person') {
+    const p = contact(o.id) || { name: '', position: '', email: '', phone: '', active: true };
+    return modal(o.id ? 'Editar persona' : 'Nueva persona', `<p class="muted sm" style="margin:0">Cliente: <b>${esc(client(o.clientId).name)}</b>. Se ofrecerá como solicitante al crear tickets de este cliente.</p>
+      <div><label>Nombre completo</label><input name="name" required maxlength="120" autocomplete="off" value="${esc(p.name)}"></div>
+      <div><label>Cargo o área (opcional)</label><input name="position" maxlength="120" autocomplete="off" placeholder="Ej: Jefa de Farmacia" value="${esc(p.position)}"></div>
+      <div class="grid" style="grid-template-columns:1fr 1fr;gap:10px"><div><label>Correo (opcional)</label><input type="email" name="email" maxlength="200" autocomplete="off" value="${esc(p.email)}"></div>
+      <div><label>Teléfono o anexo (opcional)</label><input name="phone" maxlength="60" autocomplete="off" value="${esc(p.phone)}"></div></div>
+      ${o.id ? `<div><label>Estado</label><select name="active">${opt('1', 'Activa', p.active ? '1' : '0')}${opt('0', 'Inactiva (no se ofrece en tickets nuevos)', p.active ? '1' : '0')}</select></div>` : ''}`, 'savePerson');
+  }
   if (o.kind === 'pw') return modal('Cambiar mi contraseña', `${pwField('cur', 'Contraseña actual', 'current-password')}${pwField('p1', 'Nueva contraseña', 'new-password')}${pwField('p2', 'Repite la nueva contraseña', 'new-password')}${pwHint}`, 'savePw');
   if (o.kind === 'temp') return `<div class="overlay center"><div class="modal col"><h2>🔑 ${o.created ? 'Usuario creado' : 'Contraseña restablecida'}</h2><p class="muted">Entrégale esto a <b>${esc(o.name)}</b> por un canal seguro. <b>La contraseña se muestra una sola vez</b>; al ingresar deberá elegir una propia.</p>
     <div class="card" style="background:var(--bg2)"><div class="muted sm">Usuario (o correo) para ingresar</div><div class="mono" style="font-size:16px;user-select:all">${esc(o.login)}</div><div class="muted sm" style="margin-top:8px">Contraseña temporal</div><div class="mono" style="font-size:20px;letter-spacing:1px;user-select:all">${esc(o.pw)}</div></div>
@@ -859,7 +928,7 @@ function render() {
   if (ui.booting) { app.innerHTML = '<div class="login"><div class="box"><h1 style="font-size:42px">NovaDesk</h1><p class="muted">Conectando…</p></div></div>'; return; }
   if (!me()) { app.innerHTML = viewLogin(); const u = $('[name=username]'); if (u && !u.value) u.focus(); else if ($('#lpw')) $('#lpw').focus(); return; }
   if (me().mustChange) { app.innerHTML = viewForceChange(); return; }
-  const views = { dashboard: viewDashboard, tickets: viewTickets, board: viewBoard, changes: viewChanges, clients: viewClients, users: viewUsers, new: viewNew };
+  const views = { dashboard: viewDashboard, tickets: viewTickets, board: viewBoard, changes: viewChanges, clients: viewClients, client: viewClient, users: viewUsers, new: viewNew };
   const t = ui.open && visible().find(x => x.id === ui.open);
   app.innerHTML = (views[ui.view] || viewDashboard)() + (t ? viewDrawer(t) : '') + viewOverlay();
   if (keep) { const el = $(`[data-f="${keep}"]`); if (el) { el.focus(); try { el.setSelectionRange(pos, pos); } catch {} } }
@@ -882,7 +951,7 @@ function nlSearch(q) {
   const free = n.split(/\s+/).filter(w => w.length > 2 && !stop.test(w) && !(cl && norm(cl.name) === w) && !(tech && norm(tech.name).includes(w)) && !(st && norm(st).includes(w)));
   const res = visible().filter(t => (!f.type || t.type === f.type) && (!f.client || t.clientId === f.client) && (!f.prio || f.prio.includes(t.priority)) && (!f.unassigned || !t.assigneeId)
     && (!f.mine || t.assigneeId === S.session) && (!f.tech || t.assigneeId === f.tech) && (!f.status || t.status === f.status) && (!f.closed || !isOpen(t)) && (!f.open || isOpen(t) || f.status)
-    && free.every(w => norm(t.id + ' ' + t.title + ' ' + t.desc + ' ' + t.category).includes(w)));
+    && free.every(w => norm(t.id + ' ' + t.title + ' ' + t.desc + ' ' + t.category + ' ' + requesterOf(t)).includes(w)));
   return { res: res.slice(0, 8), parts };
 }
 function paletteResults() {
@@ -929,11 +998,17 @@ const A = {
   comment: d => { const txt = $('#cm').value.trim(); if (!txt) return; const t = S.tickets.find(x => x.id === d.id); t.comments.push({ id: uid(), by: S.session, at: Date.now(), text: txt, internal: $('#cmInt').checked }); t.updatedAt = Date.now(); save(); render(); },
   applyAI: d => { const t = S.tickets.find(x => x.id === d.id), a = classify(t.title + ' ' + t.desc, t.clientId, { excludeId: t.id, type: t.type }); t.category = a.category; t.priority = a.priority; t.ai = a.confidence; log(t, `Nova aplicó categoría «${a.category}» y prioridad ${PRIO[a.priority]}`); save(); toast('Sugerencia aplicada'); render(); },
   assignAI: d => { const t = S.tickets.find(x => x.id === d.id), a = classify(t.title + ' ' + t.desc, t.clientId, { excludeId: t.id, type: t.type }); t.assigneeId = a.assignee.id; log(t, `Nova asignó a ${a.assignee.name}`); save(); toast(`Asignado a ${a.assignee.name}`); render(); },
-  csv: () => { const rows = [['ID', 'Tipo', 'Asunto', 'Cliente', 'Prioridad', 'Estado', 'Categoría', 'Asignado', 'Creado']].concat(filtered().map(t => [t.id, TYPES[t.type].name, t.title, client(t.clientId).name, PRIO[t.priority], t.status, t.category, user(t.assigneeId)?.name || '', new Date(t.createdAt).toISOString()]));
+  csv: () => { const rows = [['ID', 'Tipo', 'Asunto', 'Cliente', 'Solicitante', 'Prioridad', 'Estado', 'Categoría', 'Asignado', 'Creado']].concat(filtered().map(t => [t.id, TYPES[t.type].name, t.title, client(t.clientId).name, requesterOf(t), PRIO[t.priority], t.status, t.category, user(t.assigneeId)?.name || '', new Date(t.createdAt).toISOString()]));
     const blob = new Blob(['﻿' + rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(';')).join('\n')], { type: 'text/csv' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'novadesk-tickets.csv'; a.click(); },
   clientForm: d => { ui.overlay = { kind: 'client', id: d.id }; render(); },
   userForm: d => { ui.overlay = { kind: 'user', id: d.id }; render(); },
-  clientTickets: d => { ui.f = { q: '', type: '', status: 'abiertos', client: d.id, prio: '', assignee: '' }; ui.view = 'tickets'; render(); },
+  clientTickets: d => { ui.f = { q: '', type: '', status: 'abiertos', client: d.id, prio: '', assignee: '', contact: '', pq: '' }; ui.view = 'tickets'; render(); },
+  clientPeople: d => { ui.clientId = d.id; ui.f.pq = ''; ui.peopleAll = false; ui.view = 'client'; ui.open = null; ui.overlay = null; render(); },
+  peopleFilter: d => { ui.peopleAll = d.v === 'all'; render(); },
+  personForm: d => { ui.overlay = { kind: 'person', id: d.id || null, clientId: d.client || contact(d.id)?.clientId }; render(); },
+  togglePerson: d => { const p = contact(d.id); if (!p) return; p.active = !p.active; save(); toast(p.active ? `${p.name} quedó activa` : `${p.name} quedó inactiva`); render(); },
+  personTickets: d => { const p = contact(d.id); if (!p) return; ui.f = { q: '', type: '', status: '', client: p.clientId, prio: '', assignee: '', contact: p.id, pq: '' }; ui.view = 'tickets'; render(); },
+  clearContact: () => { ui.f.contact = ''; render(); },
 };
 const SUBMIT = {
   async savePw(fd) {
@@ -944,6 +1019,21 @@ const SUBMIT = {
   saveClient(fd) { if (role() !== 'admin') return false; const o = ui.overlay, n = fd.get('name').trim(); if (!n) return; const data = { name: n, code: (fd.get('code') || n.slice(0, 4)).toUpperCase(), color: fd.get('color'), contact: fd.get('contact'), slaFactor: parseFloat(fd.get('slaFactor')) || 1 };
     if (S.clients.some(c => c.id !== o.id && (c.name.toLowerCase() === data.name.toLowerCase() || c.code === data.code))) return toast('Ya existe un cliente con ese nombre o código'), false;
     if (o.id) Object.assign(S.clients.find(c => c.id === o.id), data); else S.clients.push({ id: uid(), ...data }); toast('Cliente guardado'); },
+  savePerson(fd) {   // analista y administrador (en la base lo exige RLS)
+    if (!staff()) return false;
+    const o = ui.overlay, cid = o.clientId, name = fd.get('name').trim().replace(/\s+/g, ' '), position = (fd.get('position') || '').trim(), email = (fd.get('email') || '').trim(), phone = (fd.get('phone') || '').trim();
+    if (!name) return toast('Falta el nombre'), false;
+    if (!S.clients.some(c => c.id === cid)) return toast('No se encontró el cliente'), false;
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return toast('El correo no parece válido'), false;
+    if (S.contacts.some(p => p.id !== o.id && p.clientId === cid && norm(p.name) === norm(name) && norm(p.position) === norm(position))) return toast('Esa persona ya está registrada en este cliente'), false;
+    if (o.id) {
+      const p = contact(o.id); if (!p) return false;
+      const renamed = p.name !== name;
+      Object.assign(p, { name, position, email, phone, active: fd.get('active') !== '0' });
+      if (renamed) S.tickets.forEach(t => { if (t.contactId === p.id) t.requester = name; });   // el nombre guardado en los tickets sigue al de la persona
+    } else S.contacts.push({ id: uid(), clientId: cid, name, position, email, phone, active: true });
+    toast('Persona guardada');
+  },
   async saveUser(fd) {
     if (role() !== 'admin') return false;
     const o = ui.overlay;
@@ -1017,10 +1107,11 @@ async function createTicket(fd) {
   try {
     const title = fd.get('title').trim(), desc = fd.get('desc').trim(), cl = fd.get('clientId'), a = classify(title + ' ' + desc, cl, { type: fd.get('type') });
     const type = fd.get('type') || a.type, auto = [!fd.get('type'), !fd.get('priority'), !fd.get('category')].some(Boolean);
+    const person = contactsReady ? S.contacts.find(p => p.id === fd.get('contactId') && p.clientId === cl && p.active) : null;   // la persona elegida (null = nombre escrito a mano)
     const { data: id, error } = await sb.rpc('next_ticket_id', { p_type: type });
     if (error) return toast('No se pudo generar el número del ticket: ' + error.message);
     const now = Date.now();
-    const t = { id, type, title, desc, clientId: cl, requester: fd.get('requester').trim() || me().name, priority: +fd.get('priority') || a.priority, category: fd.get('category') || a.category,
+    const t = { id, type, title, desc, clientId: cl, requester: person ? person.name : (fd.get('requester') || '').trim() || me().name, contactId: person ? person.id : null, priority: +fd.get('priority') || a.priority, category: fd.get('category') || a.category,
       status: type === 'C' ? 'Borrador' : 'Nuevo', assigneeId: null, createdBy: S.session, createdAt: now, updatedAt: now, comments: [], attachments: [], history: [{ at: now, by: S.session, text: 'Ticket creado' + (auto ? ` · Nova clasificó con ${a.confidence}% de confianza` : '') }], ai: auto ? a.confidence : null };
     if (type === 'C') { const st = fd.get('start'); t.change = { impact: +fd.get('impact') || 2, complexity: +fd.get('complexity') || 2, start: st ? new Date(st).getTime() : null, hours: +fd.get('hours') || 2, rollback: fd.get('rollback') || '', approvals: [] }; }
     else if (staff() && a.assignee && t.priority <= 2) { t.assigneeId = a.assignee.id; t.status = 'Asignado'; t.history.push({ at: now, by: S.session, text: `Nova asignó automáticamente a ${a.assignee.name} (prioridad ${PRIO[t.priority]})` }); }
@@ -1053,14 +1144,23 @@ document.addEventListener('input', e => {
 document.addEventListener('change', e => {
   const el = e.target, f = el.dataset.f; if (f) { ui.f[f] = el.value; render(); return; }
   if (el.dataset.file) { const files = [...el.files].map(named), t = S.tickets.find(x => x.id === el.dataset.file); el.value = ''; if (el.dataset.file === 'new') queueFiles(files); else if (t) attach(t, files); return; }
-  if (el.closest('#newForm') && el.name === 'type') { const fd = new FormData(el.form); ui.draft = Object.fromEntries(fd.entries()); render(); return; }
+  if (el.closest('#newForm') && ['type', 'clientId', 'contactId'].includes(el.name)) {   // estos tres cambian lo que muestra el formulario (reglas de Nova y personas del cliente)
+    const fd = new FormData(el.form); ui.draft = Object.fromEntries(fd.entries());
+    if (el.name === 'clientId') ui.draft.contactId = '';   // la persona elegida era del cliente anterior
+    render(); return;
+  }
   const t = ui.open && S.tickets.find(x => x.id === ui.open); if (!t) return;
   if ((el.dataset.edit || el.dataset.chg) && !staff() && !(el.dataset.chg && t.status === 'Borrador')) return toast('Acción no permitida para tu rol');
+  if (el.dataset.edit === 'contactId') {   // cambiar la persona solicitante (el nombre también se guarda como texto en el ticket)
+    const p = contact(el.value);
+    if (p && p.clientId === t.clientId && p.id !== t.contactId) { t.contactId = p.id; t.requester = p.name; log(t, 'Solicitante: ' + p.name); save(); toast('Ticket actualizado'); }
+    render(); return;
+  }
   if (el.dataset.edit) { const k = el.dataset.edit; let v = el.value; if (k === 'priority') v = +v; if (k === 'assigneeId') v = v || null; t[k] = v; log(t, `${k === 'assigneeId' ? 'Asignado a ' + (user(v)?.name || 'nadie') : k === 'priority' ? 'Prioridad: ' + PRIO[v] : 'Categoría: ' + v}`); save(); toast('Ticket actualizado'); render(); }
   if (el.dataset.chg) { const k = el.dataset.chg; t.change = t.change || { impact: 2, complexity: 2, hours: 2, approvals: [] }; t.change[k] = k === 'start' ? (el.value ? new Date(el.value).getTime() : null) : ['impact', 'complexity'].includes(k) ? +el.value : el.value; log(t, `Plan del cambio actualizado (${k})`); save(); render(); }
 });
 const ADMIN_ACTS = new Set(['clientForm', 'userForm', 'newUser', 'resetPw', 'mondayCheck']);
-const STAFF_ACTS = new Set(['applyAI', 'assignAI', 'csv', 'cab', 'mondayLink', 'mondayCreate', 'mondaySync', 'mondayUnlink']);
+const STAFF_ACTS = new Set(['personForm', 'togglePerson', 'applyAI', 'assignAI', 'csv', 'cab', 'mondayLink', 'mondayCreate', 'mondaySync', 'mondayUnlink']);
 document.addEventListener('submit', async e => {
   e.preventDefault();
   if (e.target.id === 'authForm') return submitAuth(e.target);

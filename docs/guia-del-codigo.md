@@ -68,7 +68,7 @@ Una librería externa en el navegador: `supabase-js`, cargada desde jsDelivr (CD
 | `dev/backend.js` | Simula Supabase y Monday **dentro del navegador** para trabajar en DEV sin gastar nada. Solo se usa en `localhost`. | Si cambias la forma de hablar con Supabase, hay que reflejarlo aquí. |
 | `dev/monday.html` | Tablero de Monday «de mentira» que se abre desde DEV. | Rara vez. |
 | `docs/schema.sql` | Esquema base de la base de datos (tablas, funciones, RLS, vistas para Power BI). | No se edita: los cambios van en una migración nueva. |
-| `docs/migracion-02-app.sql` … `migracion-05-monday.sql` | Cambios sucesivos: creación de perfil al registrar usuario (02), permisos reforzados (03), adjuntos (04), vínculo con Monday (05). Se ejecutan **en orden**. | Al agregar una migración nueva (número siguiente). |
+| `docs/migracion-02-app.sql` … `migracion-06-contactos.sql` | Cambios sucesivos: creación de perfil al registrar usuario (02), permisos reforzados (03), adjuntos (04), vínculo con Monday (05), personas de cada cliente (06). Se ejecutan **en orden**. | Al agregar una migración nueva (número siguiente). |
 | `docs/pruebas-permisos.sql` | Batería de pruebas de los permisos con usuarios falsos. No deja nada guardado. | Se ejecuta después de **cualquier** cambio en las reglas de la base. |
 | `supabase/functions/admin-users/index.ts` | Crea usuarios y restablece contraseñas (solo administrador). | Si cambia cómo se crean usuarios. |
 | `supabase/functions/monday-sync/index.ts` | Crea y actualiza el ítem de Monday de un ticket; revisa la conexión. | Si cambia qué se manda a Monday. |
@@ -141,7 +141,7 @@ El archivo está dividido por comentarios con la forma `/* ───── Nombr
 | **Adjuntos** | Validación de archivos antes de subir (tipo y 10 MB), `attach()` (primero registra la ficha y después sube el archivo), `openFile()` (URL firmada de 1 minuto), `dropFile()` (primero borra el archivo y después la ficha), `viewFiles()`. |
 | **Monday** | `parseMondayUrl()`, `mondayLink/Create/Unlink/Sync`, `queueMonday()`, `mondayProbe()` (pregunta si la función está lista), `viewMonday()` (tarjeta del ticket), `mondayCheck()` y `viewMondayAdmin()` (revisión de conexión, solo administrador). |
 | **Utilidades de vista** | `visible()` (los tickets que **este usuario** debe ver), formato de fechas, avisos (`toast`), insignias. |
-| **Vistas** | Una función por pantalla: `viewLogin`, `viewForceChange` (cambio obligatorio de clave temporal), `viewShell` (menú lateral), `viewDashboard`, `viewTickets`, `viewBoard` (tablero kanban), `viewChanges` (CAB y calendario), `viewClients`, `viewUsers`, `viewNew` (ticket nuevo), `viewDrawer` (ticket abierto), `viewOverlay` (ventanas emergentes). Cada una **devuelve texto HTML**. |
+| **Vistas** | Una función por pantalla: `viewLogin`, `viewForceChange` (cambio obligatorio de clave temporal), `viewShell` (menú lateral), `viewDashboard`, `viewTickets`, `viewBoard` (tablero kanban), `viewChanges` (CAB y calendario), `viewClients`, `viewClient` (las personas de un cliente), `viewUsers`, `viewNew` (ticket nuevo), `viewDrawer` (ticket abierto), `viewOverlay` (ventanas emergentes). Cada una **devuelve texto HTML**. |
 | **Render y router** | `render()` elige la vista según `ui.view`, la pinta, y además `nlSearch()` / `paletteResults()` (la búsqueda en lenguaje natural con Ctrl + K). |
 | **Acciones** | El objeto `A` (una función por botón), `SUBMIT` (formularios), `login()`, `createTicket()`, `callFn()` (llama a una Edge Function), `setOwnPassword()`. |
 | **Eventos** | Los «oídos» de la página: clics, escritura, cambios, envío de formularios, atajos de teclado, arrastrar y soltar (archivos y tarjetas del tablero), pegar capturas. Al final, `boot()`. |
@@ -196,7 +196,7 @@ solo cambia sugerencias. Nova está pensada para poder reemplazarse por una llam
 ## 7. La base de datos
 
 PostgreSQL dentro de Supabase. Se arma ejecutando, **en este orden**, en el *SQL Editor*: `schema.sql`, `migracion-02-app.sql`, `migracion-03-permisos.sql`,
-`migracion-04-adjuntos.sql`, `migracion-05-monday.sql`; y después `pruebas-permisos.sql` (todo debe salir ✔).
+`migracion-04-adjuntos.sql`, `migracion-05-monday.sql`, `migracion-06-contactos.sql`; y después `pruebas-permisos.sql` (todo debe salir ✔).
 
 ### Tablas
 
@@ -212,6 +212,7 @@ PostgreSQL dentro de Supabase. Se arma ejecutando, **en este orden**, en el *SQL
 | `audit_log` | Registro de seguridad (inicios de sesión, contraseñas, usuarios). Solo el administrador lo lee. |
 | `ticket_attachments` | La «ficha» de cada archivo (nombre, tipo, tamaño, quién lo subió, ruta). |
 | `ticket_links` | El ítem de Monday vinculado a un ticket (máximo uno por ticket). |
+| `client_contacts` | Las **personas de cada cliente** (nombre, cargo o área, correo, teléfono, activa). El ticket apunta a una con `tickets.contact_id` (la base exige que sea del mismo cliente del ticket) y además guarda su nombre en `tickets.requester`, que sigue siendo el texto que leen Power BI y los tickets antiguos. |
 | *Storage* `ticket-files` | El bucket **privado** donde están los archivos de verdad. |
 
 ### Funciones y disparadores (triggers) importantes
@@ -234,6 +235,8 @@ Todas las tablas tienen **RLS** (*Row Level Security*): la base filtra cada cons
 - Solo el administrador gestiona clientes y usuarios y lee el registro de seguridad.
 - Adjuntos: los ve quien ve el ticket; los borra quien los subió, un analista o el administrador.
 - Vínculo con Monday: lo ven quienes ven el ticket; solo analista/administrador lo crean o quitan.
+- Personas de los clientes: las ve todo usuario activo (las necesita para crear tickets); solo analista/administrador las agregan o editan; nadie las borra (se desactivan).
+  El técnico elige la persona al crear el ticket pero no la cambia después (`tickets_guard`).
 - El técnico no cambia prioridad, categoría, asunto ni reasigna (solo puede tomar un ticket sin asignar).
 
 ### Para Power BI
@@ -322,6 +325,7 @@ Después de **cualquier** cambio: probarlo en DEV → subir a QA → probar ahí
 | Quiero… | Toco… |
 |---|---|
 | **Agregar un cliente** | Nada de código: pantalla *Clientes* → «Nuevo cliente» (solo administrador). |
+| **Agregar las personas de un cliente** | Nada de código: *Clientes* → «👥 Personas» → «＋ Nueva persona» (analista o administrador). Al crear un ticket aparecen como solicitante. Código: `viewClient()`, `requesterField()`, `requesterCell()`, `SUBMIT.savePerson`. |
 | **Cambiar los tiempos de SLA** | `SLA_H` en `js/novadesk.js` (+ la vista `bi.tickets` si usas Power BI). El factor por cliente se cambia en la pantalla *Clientes*. |
 | **Agregar una categoría** | `CATS`, `CAT_KW` y `PLAYBOOK` en `js/novadesk.js`. No requiere SQL (la categoría es texto libre en la base). Las habilidades de los técnicos usan estos mismos nombres. |
 | **Ajustar cómo Nova clasifica** | `TYPE_KW`, `CAT_KW`, `CRIT`, `HIGH`, `LOW`, `MASS`, `CALM`, `PLAYBOOK` (sección 6). |

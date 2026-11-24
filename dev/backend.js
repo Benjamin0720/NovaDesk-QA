@@ -28,7 +28,7 @@ function seed() {
   // T(id, tipo, asunto, descripción, cliente 1-3, prioridad, estado, categoría, técnico (n.º de usuario), creador, horas desde que se creó, extras)
   const T = (id, type, title, description, cl, priority, status, category, assignee, creator, hAgo, extra) => ({ id, type, title, description, client_id: nid(100 + cl), requester: 'Prueba DEV',
     priority, status, category, assignee_id: assignee ? nid(assignee) : null, created_by: nid(creator), ai_confidence: 80, created_at: ago(hAgo), updated_at: ago(Math.max(hAgo - 2, 0.2)),
-    resolved_at: null, change_impact: null, change_complexity: null, change_start: null, change_hours: null, change_rollback: null, ...extra });
+    resolved_at: null, change_impact: null, change_complexity: null, change_start: null, change_hours: null, change_rollback: null, contact_id: null, ...extra });
   const tickets = [
     T('I-0001', 'I', 'Impresora de farmacia no imprime', 'La impresora de la farmacia muestra error de atasco y no imprime las etiquetas.', 1, 2, 'En curso', 'Impresión', 3, 2, 30),
     T('I-0002', 'I', 'Sin internet en recepción', 'Desde esta mañana no hay conexión a internet en recepción.', 2, 1, 'Asignado', 'Red y conectividad', 4, 2, 3),
@@ -61,7 +61,25 @@ function seed() {
     linked_by: nid(2), created_at: ago(4), synced_at: synced ? ago(1) : null, sync_error: null });
   db.t.ticket_links.push(link('I-0001', BOARD, '9001', true), link('I-0003', BOARD, '9002', true), link('R-0002', '555', '8002', false));
   db.monday.items.push(mItem(db, 'I-0001', '9001'), mItem(db, 'I-0003', '9002'));
+  addPeople(db);
   return db;
+}
+/* Personas de cada cliente (docs/migracion-06-contactos.sql). [n.º, cliente 1-3, nombre, cargo, correo, teléfono]; el I-0004 queda sin persona a propósito (solicitante escrito a mano). */
+const PEOPLE = [[201, 1, 'Marcela Soto', 'Jefa de Farmacia', 'msoto@bupa.example', '+56 2 2345 0101'], [202, 1, 'Rodrigo Pizarro', 'Administrador de la clínica', 'rpizarro@bupa.example', '+56 2 2345 0102'],
+  [203, 1, 'Daniela Fuentes', 'Recursos Humanos', 'dfuentes@bupa.example', ''], [204, 2, 'Pablo Araya', 'Encargado de TI', 'paraya@curico.example', '+56 75 255 0201'],
+  [205, 2, 'Lorena Ibáñez', 'Recepción', '', '+56 75 255 0202'], [206, 3, 'Felipe Cárcamo', 'Jefe de Operaciones', 'fcarcamo@hah.example', '+56 2 2999 0301'],
+  [207, 3, 'Verónica Muñoz', 'Médico jefe', 'vmunoz@hah.example', '']];
+const PEOPLE_OF = { 'I-0001': 201, 'I-0002': 205, 'I-0003': 206, 'R-0001': 203, 'R-0002': 206, 'C-0001': 202, 'C-0002': 206 };
+/* Agrega las personas de ejemplo a una base de DEV que aún no las tiene (también a la que este navegador ya traía: no se borra nada de lo que hubiera). */
+function addPeople(db) {
+  if (db.t.client_contacts) return;
+  const stamp = new Date().toISOString();
+  db.t.client_contacts = PEOPLE.map(([n, cl, name, position, email, phone]) => ({ id: nid(n), client_id: nid(100 + cl), name, position, email: email || null, phone: phone || null, active: true, created_at: stamp }));
+  db.t.tickets.forEach(t => {
+    const p = db.t.client_contacts.find(x => x.id === nid(PEOPLE_OF[t.id]));
+    if (!('contact_id' in t)) t.contact_id = null;
+    if (p && p.client_id === t.client_id && !t.contact_id && t.requester === 'Prueba DEV') { t.contact_id = p.id; t.requester = p.name; }
+  });
 }
 function mFields(db, t) {
   const cl = db.t.clients.find(x => x.id === t.client_id), tech = db.t.profiles.find(p => p.id === t.assignee_id);
@@ -74,6 +92,7 @@ const mItem = (db, ticketId, item) => ({ id: item, resolved: '', ...mFields(db, 
 
 let db; try { db = JSON.parse(localStorage.getItem(KEY)); } catch { db = null; }
 if (!db || db.v !== VERSION) { db = seed(); }
+addPeople(db);
 const persist = () => { try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) { console.warn('[DEV] no se pudo guardar', e); } };
 /* Tu cuenta de administrador siempre existe, también si este navegador ya tenía datos de DEV de antes (no se borra nada). */
 if (!db.t.profiles.some(p => p.username === OWNER.username)) {
@@ -81,6 +100,8 @@ if (!db.t.profiles.some(p => p.username === OWNER.username)) {
   db.t.profiles.unshift({ id, username: OWNER.username, name: OWNER.name, role: 'admin', active: true, skills: [], must_change: false, last_login: null, created_at: new Date().toISOString() });
   db.auth[id] = { email: OWNER.username + EMAIL, password: PASS };
 }
+/* Todo usuario de DEV puede entrar con su usuario solo («blara»), sin escribir el correo completo: si a un perfil le falta su cuenta de acceso, se le crea. */
+db.t.profiles.forEach(p => { if (!db.auth[p.id]) db.auth[p.id] = { email: p.username + EMAIL, password: PASS }; });
 persist();
 
 /* ───────────── Archivos (adjuntos) en IndexedDB ───────────── */
@@ -110,7 +131,9 @@ const tempPassword = () => { const set = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnp
 function auth(method, path, q, body, h) {
   if (path === '/auth/v1/token') {
     if (q.get('grant_type') === 'password') {
-      const email = String(body.email || '').toLowerCase(), id = Object.keys(db.auth).find(i => db.auth[i].email === email && db.auth[i].password === body.password);
+      /* La app convierte «blara» en «blara@novadesk.local»; aquí se acepta por el correo guardado o por el usuario del perfil (aunque la cuenta de acceso tenga otro correo). */
+      const email = String(body.email || '').toLowerCase(), uname = email.endsWith(EMAIL) ? email.slice(0, -EMAIL.length) : null;
+      const id = Object.keys(db.auth).find(i => (db.auth[i].email === email || (uname && profile(i)?.username === uname)) && db.auth[i].password === body.password);
       return id ? session(id) : json({ code: 400, error_code: 'invalid_credentials', msg: 'Invalid login credentials' }, 400);
     }
     if (q.get('grant_type') === 'refresh_token') {
@@ -129,7 +152,7 @@ function auth(method, path, q, body, h) {
   return json({ msg: 'DEV: ruta de Auth no prevista ' + path }, 404);
 }
 
-const STAMPED = ['ticket_comments', 'ticket_history', 'change_approvals', 'audit_log', 'ticket_attachments', 'ticket_links'];
+const STAMPED = ['ticket_comments', 'ticket_history', 'change_approvals', 'audit_log', 'ticket_attachments', 'ticket_links', 'client_contacts'];
 function rest(method, path, q, body, h, uid) {
   if (!uid) return pgErr('PGRST301', 'JWT inválido o ausente', 401);
   const rpc = /^\/rest\/v1\/rpc\/(\w+)$/.exec(path);
@@ -173,7 +196,11 @@ function rest(method, path, q, body, h, uid) {
   if (method === 'POST') {
     const items = (Array.isArray(body) ? body : [body]).map(x => ({ ...x })), upsert = /merge-duplicates/.test(h.get('Prefer') || ''), now = Date.now(), added = [];
     if (table === 'clients' && role !== 'admin') return deny();
+    if (table === 'client_contacts' && !['admin', 'analista'].includes(role)) return deny();   // solo analista o administrador agregan personas
+    const fkContact = (contactId, clientId) => !contactId || db.t.client_contacts.some(p => p.id === contactId && p.client_id === clientId);   // llave compuesta tickets_contact_fk
     for (const [i, it] of items.entries()) {
+      if (table === 'client_contacts' && (!String(it.name || '').trim() || !db.t.clients.some(c => c.id === it.client_id))) return pgErr('23514', 'new row for relation "client_contacts" violates check constraint', 400);
+      if (table === 'tickets' && !fkContact(it.contact_id, it.client_id)) return pgErr('23503', 'insert or update on table "tickets" violates foreign key constraint "tickets_contact_fk"', 409);
       if (table === 'ticket_links') {
         if (!['admin', 'analista'].includes(role) || it.linked_by !== uid || it.synced_at || it.sync_error) return deny();
         if (!/^https:\/\/[a-z0-9-]+\.monday\.com\/\S*$/i.test(it.url || '') || it.url.length > 500) return pgErr('23514', 'new row for relation "ticket_links" violates check constraint', 400);
@@ -196,7 +223,9 @@ function rest(method, path, q, body, h, uid) {
   }
   if (method === 'PATCH') {
     if (table === 'profiles' && role !== 'admin') return answer([], 200);
+    if (table === 'client_contacts' && !['admin', 'analista'].includes(role)) return answer([], 200);
     const hit = rows.filter(r => visible(r) && match(r));
+    if (table === 'tickets' && body.contact_id && hit.some(r => !db.t.client_contacts.some(p => p.id === body.contact_id && p.client_id === r.client_id))) return pgErr('23503', 'insert or update on table "tickets" violates foreign key constraint "tickets_contact_fk"', 409);
     if (['ticket_links', 'ticket_attachments', 'ticket_comments', 'ticket_history', 'audit_log', 'change_approvals'].includes(table)) return answer([], 200);   // nadie los edita
     hit.forEach(r => { Object.assign(r, body); if (table === 'tickets') r.updated_at = new Date().toISOString(); });
     persist(); return answer(hit, 200);
@@ -340,7 +369,7 @@ addEventListener('DOMContentLoaded', () => {
   const btn = 'background:#26264d;color:#fff;border:1px solid #3b3b73;border-radius:8px;padding:5px 8px;cursor:pointer;font:inherit;text-align:left';
   d.innerHTML = `<summary style="cursor:pointer;font-weight:600">🧪 DEV · datos simulados</summary><div style="margin-top:8px;display:grid;gap:6px">
     <div data-dev-aviso style="display:none;background:#5a2a00;border:1px solid #ffb84d;border-radius:8px;padding:6px 8px">⚠️ Esa clave no sirve en DEV. Usa uno de estos botones.</div>
-    <div style="opacity:.8">Sin Supabase: todo vive en este navegador. Tu correo y tu clave reales NO existen aquí: entra con un botón.</div>
+    <div style="opacity:.8">Sin Supabase: todo vive en este navegador. Tu correo y tu clave reales NO existen aquí: entra con un botón, o con el usuario solo (p. ej. «${OWNER.username}», sin el correo completo) y la clave de DEV, que ya viene escrita en el formulario.</div>
     ${[['👑 ' + OWNER.name + ' (tu cuenta)', OWNER.username], ['👑 Admin DEV', 'admin'], ['🧭 Analista', 'analista'], ['🛠️ Técnico 1', 'tecnico1'], ['🛠️ Técnico 2', 'tecnico2']].map(([l, u]) => `<button style="${btn}" data-dev-login="${u}">${l}</button>`).join('')}
     <a href="/dev/monday.html" target="_blank" style="${btn};text-decoration:none;color:#fff">📋 Ver el Monday simulado ↗</a>
     <button style="${btn}" data-dev-reset>♻️ Restablecer datos de DEV</button></div>`;
@@ -360,7 +389,12 @@ addEventListener('DOMContentLoaded', () => {
   let enLogin = null;
   const vigilar = () => {
     const ahora = !!document.getElementById('authForm');
-    if (ahora !== enLogin) { enLogin = ahora; d.open = ahora; }
+    if (ahora !== enLogin) {
+      enLogin = ahora; d.open = ahora;
+      /* Al aparecer el formulario de acceso se precarga tu usuario y la clave de DEV: basta con «Ingresar» (se pueden cambiar a mano). */
+      const f = document.getElementById('authForm'), u = f && f.querySelector('[name=username]'), p = f && f.querySelector('[name=password]');
+      if (u && p && !u.value && !p.value) { u.value = OWNER.username; p.value = PASS; }
+    }
     aviso.style.display = ahora && /incorrectos/.test(app.innerText) ? 'block' : 'none';
   };
   if (app) { new MutationObserver(vigilar).observe(app, { childList: true, subtree: true }); vigilar(); }

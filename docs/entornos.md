@@ -50,7 +50,7 @@ Las claves *publishable* son públicas por diseño; la clave *secret*/service_ro
 **B. Supabase — proyecto de QA** (el plan gratuito permite 2 proyectos activos a la vez)
 1. Crea un proyecto nuevo, p. ej. `novadesk-qa`.
 2. En *SQL Editor*, ejecuta **en este orden**: `docs/schema.sql`, `docs/migracion-02-app.sql`, `docs/migracion-03-permisos.sql`, `docs/migracion-04-adjuntos.sql`,
-   `docs/migracion-05-monday.sql`. Después ejecuta `docs/pruebas-permisos.sql`: todas las líneas deben salir con ✔.
+   `docs/migracion-05-monday.sql`, `docs/migracion-06-contactos.sql`. Después ejecuta `docs/pruebas-permisos.sql`: todas las líneas deben salir con ✔.
 3. Crea el primer administrador: *Authentication → Users → Add user* con el correo `<tu-usuario>@novadesk.local` y una clave (marca *Auto Confirm User*), y promuévelo:
    `update public.profiles set role='admin', active=true where username='<tu-usuario>';`
 4. Deja la autenticación configurada igual que en Producción (por ejemplo, con el registro público de usuarios desactivado).

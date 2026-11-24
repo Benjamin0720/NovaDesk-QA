@@ -109,7 +109,7 @@ Casi todo el acceso a Supabase está **concentrado** en unas ≈30 llamadas, den
 Hazlos **primero con QA** (un servidor/proyecto de ensayo) y repite en Producción con lo aprendido.
 
 1. **Preparar el destino:** proyecto Supabase nuevo (A) o servidor con el stack autoalojado (B), con dominio y HTTPS.
-2. **Ejecutar el SQL en orden:** `schema.sql`, `migracion-02-app.sql`, `migracion-03-permisos.sql`, `migracion-04-adjuntos.sql`, `migracion-05-monday.sql`. Luego `pruebas-permisos.sql`: todo debe salir ✔.
+2. **Ejecutar el SQL en orden:** `schema.sql`, `migracion-02-app.sql`, `migracion-03-permisos.sql`, `migracion-04-adjuntos.sql`, `migracion-05-monday.sql`, `migracion-06-contactos.sql`. Luego `pruebas-permisos.sql`: todo debe salir ✔.
    - **Cambia la contraseña del rol `powerbi_reader` o déjalo sin acceso** antes de abrir el sistema (ver la sección 13 de la [guía del código](guia-del-codigo.md)). El `schema.sql` actual ya lo crea sin acceso (`nologin`); las versiones anteriores lo crearon con una clave de relleno conocida, así que si migras la base **desde** un proyecto antiguo, revisa ese rol en el destino.
 3. **Crear el primer administrador** (usuario en Authentication + `update public.profiles set role='admin', active=true …`), igual que en [entornos.md](entornos.md).
 4. **Funciones:** desplegar `admin-users` y `monday-sync` y cargar los secretos de Monday (`MONDAY_TOKEN`, `MONDAY_BOARD_ID`, `MONDAY_COLUMNS`, `MONDAY_APP_URL`…). En proyectos nuevos de la nube,
